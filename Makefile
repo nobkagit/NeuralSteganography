@@ -1,28 +1,34 @@
-.PHONY: install setup doctor smoke clean
+.PHONY: init doctor test lint type smoke clean _ensure_venv
 
-VENV?=.venv
-PYTHON=$(VENV)/bin/python
-PIP=$(PYTHON) -m pip
+VENV ?= .venv
+PYTHON := $(VENV)/bin/python
+RUFF := $(VENV)/bin/ruff
+MYPY := $(VENV)/bin/mypy
 
-install: $(PYTHON)
-	$(PIP) install --upgrade pip
-	$(PIP) install -e .
-
-$(PYTHON):
-	python3 -m venv $(VENV)
-
-setup:
+init:
 	bash scripts/setup_env.sh
 
-doctor: $(PYTHON)
-	$(PYTHON) -m neuralstego doctor
+doctor:
+	bash scripts/doctor.sh
 
-smoke: doctor
+_ensure_venv:
+	@if [ ! -x "$(PYTHON)" ]; then \
+		echo "لطفاً ابتدا 'make init' را اجرا کنید تا محیط مجازی ساخته شود." >&2; \
+		exit 1; \
+	fi
+
+test: _ensure_venv
+	$(PYTHON) -m pytest -q
+
+lint: _ensure_venv
+	$(RUFF) check .
+
+type: _ensure_venv
+	$(MYPY) src
+
+smoke: _ensure_venv
 	bash scripts/smoke_test_cli.sh
 
 clean:
-	rm -rf $(VENV)
+	rm -rf $(VENV) __pycache__ */__pycache__ .mypy_cache .pytest_cache .ruff_cache
 	rm -f tmp_stego.txt
-	rm -rf models
-	rm -rf data
-	rm -f .env
