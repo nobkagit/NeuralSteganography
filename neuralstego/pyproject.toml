@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "neuralstego"
 version = "0.1.0"
 description = "Neural steganography CLI toolkit"
-readme = "neuralstego/README.md"
+readme = "README.md"
 authors = [
   { name = "NeuralSteganography Developers" }
 ]
@@ -31,9 +31,6 @@ dev = [
 
 [project.scripts]
 neuralstego = "neuralstego.cli:main"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
