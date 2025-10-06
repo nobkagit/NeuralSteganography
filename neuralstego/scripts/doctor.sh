@@ -11,5 +11,5 @@ echo "Checking pytest availability..."
 if python -m pytest --version >/dev/null 2>&1; then
   echo "pytest is available."
 else
-  echo "pytest is not installed. Install with: python -m pip install -e '.[dev]'" >&2
+  echo "pytest is not installed. Install with: python -m pip install -e .[dev]" >&2
 fi

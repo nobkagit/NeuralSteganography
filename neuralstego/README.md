@@ -14,16 +14,8 @@
 python -m venv .venv
 source .venv/bin/activate  # در ویندوز: .venv\\Scripts\\activate
 python -m pip install --upgrade pip
-
-# از ریشه مخزن (جایی که فایل pyproject.toml قرار دارد)
 python -m pip install -e .
 ```
-
-> **نکته:** اگر از shellهایی مثل `zsh` استفاده می‌کنید، برای نصب extras باید عبارت را کوتیشن‌گذاری کنید تا glob نشود؛ نمونه:
-> 
-> ```bash
-> python -m pip install -e '.[dev]'
-> ```
 
 ## اجرای ابزار CLI
 
@@ -73,7 +65,7 @@ chmod +x scripts/*.sh
 - برای نصب وابستگی‌های توسعه:
 
   ```bash
-  python -m pip install -e '.[dev]'
+  python -m pip install -e .[dev]
   ```
 
 - اجرای بررسی‌های CI محلی:
