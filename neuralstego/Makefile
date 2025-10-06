@@ -1,15 +1,13 @@
-.PHONY: install dev test smoke
-
-PROJECT_ROOT := $(abspath $(CURDIR)/..)
+.PHONY: install dev test lint format smoke
 
 install:
-cd $(PROJECT_ROOT) && python -m pip install -e .
+python -m pip install -e .
 
 dev:
-cd $(PROJECT_ROOT) && python -m pip install -e .[dev]
+python -m pip install -e .[dev]
 
 test:
-cd $(PROJECT_ROOT) && pytest -q
+pytest -q
 
 smoke:
-cd $(PROJECT_ROOT) && ./neuralstego/scripts/smoke_test_cli.sh
+./scripts/smoke_test_cli.sh

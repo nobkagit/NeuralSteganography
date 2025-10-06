@@ -14,8 +14,6 @@
 python -m venv .venv
 source .venv/bin/activate  # در ویندوز: .venv\\Scripts\\activate
 python -m pip install --upgrade pip
-
-# از ریشه مخزن (جایی که فایل pyproject.toml قرار دارد)
 python -m pip install -e .
 ```
 
