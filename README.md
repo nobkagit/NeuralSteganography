@@ -5,7 +5,6 @@ This repository contains implementations of the steganography algorithms from ["
 
 ## Update (June 2025)
 
-Thanks to [Sabrina Ning](https://github.com/sabrina-ning) and [Wei-Chiu Ma](https://www.cs.cornell.edu/~weichiu/) for updating this repository to be compatible with the latest versions of PyTorch and Hugging Face Transformers.
 
 ## Online Demo
 
