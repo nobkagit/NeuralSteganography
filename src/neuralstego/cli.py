@@ -40,61 +40,137 @@ def main(log_level: str | None) -> None:
 
 @main.command()
 @click.option(
-    "--cover",
-    type=click.Path(path_type=Path, exists=False, dir_okay=False),
+    "--context",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
-    help="Path to the cover image that will carry the hidden message.",
+    help="Path to the context text file that seeds language generation.",
 )
 @click.option(
     "--message",
     type=str,
     required=True,
-    help="Message (or path to message) to embed inside the cover.",
+    help="Plaintext message to conceal using GPT-based steganography.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["arithmetic", "huffman", "bins", "sample"], case_sensitive=False),
+    default="arithmetic",
+    show_default=True,
+    help="Embedding backend to simulate (aligned with the reference scripts).",
+)
+@click.option(
+    "--model",
+    type=str,
+    default="gpt2-fa",
+    show_default=True,
+    help="Language model identifier to load (e.g. gpt2-fa).",
 )
 @click.option(
     "--output",
-    type=click.Path(path_type=Path, dir_okay=False, writable=True),
-    required=True,
-    help="Destination path for the generated stego artifact.",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Optional path to write the generated stego text; prints to stdout otherwise.",
 )
-def encode(cover: Path, message: str, output: Path) -> None:
-    """Encode a message into a cover asset (placeholder)."""
+def encode(
+    context: Path,
+    message: str,
+    mode: str,
+    model: str,
+    output: Path | None,
+) -> None:
+    """Encode a plaintext message into fluent text (placeholder)."""
+
+    try:
+        context_preview = context.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - simple I/O guard
+        raise click.ClickException(f"Failed to read context file: {exc}") from exc
+
+    if not context_preview.strip():
+        raise click.ClickException("Context file is empty; provide seed text to guide generation.")
+
+    summary = Table(title="encode parameters", header_style="bold magenta")
+    summary.add_column("Parameter", style="cyan", justify="right")
+    summary.add_column("Value", style="white")
+    summary.add_row("Context", str(context))
+    summary.add_row("Message", message)
+    summary.add_row("Mode", mode.lower())
+    summary.add_row("Model", model)
+    summary.add_row("Output", str(output) if output else "stdout")
+
+    _rich_echo("[bold green]Encoding message into carrier text[/bold green]")
+    console.print(summary)
+
+    preview_excerpt = context_preview.strip().splitlines()[0][:120]
+    _rich_echo(f"\nContext preview: [italic]{preview_excerpt}...[/italic]")
 
     _rich_echo(
-        "[bold green]Encode[/bold green] called with the following parameters:",
+        "\n[italic]Actual language-model driven embedding will be integrated in later phases.[/italic]"
     )
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Parameter", style="cyan", justify="right")
-    table.add_column("Value", style="white")
-    table.add_row("Cover", str(cover))
-    table.add_row("Message", message)
-    table.add_row("Output", str(output))
-    console.print(table)
+
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("<placeholder stego text>", encoding="utf-8")
+        _rich_echo(f"\n[bold green]Placeholder stego text written to[/bold green] {output}")
+    else:
+        _rich_echo("\n<placeholder stego text>")
 
 
 @main.command()
 @click.option(
     "--stego",
-    type=click.Path(path_type=Path, exists=False, dir_okay=False),
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
-    help="Path to the stego artifact containing the hidden message.",
+    help="Path to the stego text produced during encoding.",
 )
 @click.option(
-    "--output",
-    type=click.Path(path_type=Path, dir_okay=False, writable=True),
+    "--context",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
-    help="Destination for the extracted message.",
+    help="The same context file used during encoding.",
 )
-def decode(stego: Path, output: Path) -> None:
-    """Decode a message from a stego asset (placeholder)."""
+@click.option(
+    "--mode",
+    type=click.Choice(["arithmetic", "huffman", "bins"], case_sensitive=False),
+    default="arithmetic",
+    show_default=True,
+    help="Embedding backend expected when decoding stego text.",
+)
+@click.option(
+    "--model",
+    type=str,
+    default="gpt2-fa",
+    show_default=True,
+    help="Language model identifier to load for decoding.",
+)
+def decode(stego: Path, context: Path, mode: str, model: str) -> None:
+    """Decode a hidden message from generated stego text (placeholder)."""
 
-    _rich_echo("[bold blue]Decode[/bold blue] called with the following parameters:")
-    table = Table(show_header=True, header_style="bold magenta")
+    try:
+        stego_text = stego.read_text(encoding="utf-8")
+        context_text = context.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - simple I/O guard
+        raise click.ClickException(f"Failed to read text file: {exc}") from exc
+
+    table = Table(title="decode parameters", header_style="bold magenta")
     table.add_column("Parameter", style="cyan", justify="right")
     table.add_column("Value", style="white")
     table.add_row("Stego", str(stego))
-    table.add_row("Output", str(output))
+    table.add_row("Context", str(context))
+    table.add_row("Mode", mode.lower())
+    table.add_row("Model", model)
+
+    _rich_echo("[bold blue]Decoding hidden message from stego text[/bold blue]")
     console.print(table)
+
+    context_excerpt = context_text.strip().splitlines()[0][:120] if context_text.strip() else "(empty)"
+    stego_excerpt = stego_text.strip().splitlines()[0][:120] if stego_text.strip() else "(empty)"
+
+    _rich_echo(f"\nContext preview: [italic]{context_excerpt}...[/italic]")
+    _rich_echo(f"Stego preview: [italic]{stego_excerpt}...[/italic]")
+
+    _rich_echo(
+        "\n[italic]Decoding logic using GPT-based arithmetic coding will arrive in subsequent iterations.[/italic]"
+    )
 
 
 @main.command()
@@ -108,6 +184,7 @@ def doctor() -> None:
         "transformers": _import_with_version_hint(
             "transformers", "pip install transformers"
         ),
+        "bitarray": _import_with_version_hint("bitarray", "pip install bitarray"),
     }
 
     table = Table(title="neuralstego doctor", header_style="bold magenta")
