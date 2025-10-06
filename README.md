@@ -1,49 +1,76 @@
-# STEGASURAS
-STEGanography via Arithmetic coding and Strong neURAl modelS
+# NeuralSteganography
 
-This repository contains implementations of the steganography algorithms from ["Neural Linguistic Steganography," Zachary M. Ziegler*, Yuntian Deng*, Alexander M. Rush](https://arxiv.org/abs/1909.01496).
+[![CI](https://img.shields.io/badge/CI-pending-lightgrey)](https://github.com/example/neuralsteganography/actions)
+[![Lint](https://img.shields.io/badge/Lint-ruff%20%26%20mypy-lightgrey)](https://github.com/example/neuralsteganography/actions)
 
-## Update (June 2025)
+## معرفی کوتاه
+NeuralSteganography نسخهٔ مدرن و توسعه‌یافته‌ای از الگوریتم‌های استگانوگرافی متنی است که روی مدل‌های زبانی نظیر GPT2-fa و رمزگذارهای حسابی تکیه دارد. این مخزن پایهٔ موردنیاز برای فازهای بعدی پروژهٔ «NeuralStego» را آماده می‌کند؛ شامل CLI، اسکریپت‌های راه‌اندازی و راهنمای عامل‌ها.
 
+## پیش‌نیازها
+- Python ≥ 3.10
+- ابزارهای خط فرمان استاندارد (bash، make، git)
+- دسترسی به اینترنت برای دریافت مدل‌ها از HuggingFace
 
-## Online Demo
+## نصب و راه‌اندازی سریع
+۱. ساخت مخزن و محیط مجازی:
 
-Our online demo can be found at [https://steganography.live/](https://steganography.live/).
-
-## Language model
-
-Experiments in the paper use the medium (345M parameter) GPT model via [pytorch_transformers](https://github.com/huggingface/pytorch-transformers). For compute reasons the default in this code base is the small version but the medium or large versions can be used by changing the `model_name` parameter of `get_model`.
-
-## Algorithms
-
-The steganography algorithms implemented are:
-1. Our proposed arithmetic coding-based algorithm
-2. The Huffman algorithm from [RNN-Stega: Linguistic Steganography Based on Recurrent Neural Networks](https://ieeexplore.ieee.org/document/8470163)
-3. The binning algorithm from [Generating Steganographic Text with LSTMs](https://arxiv.org/abs/1705.10742)
-
-An example of encoding and decoding a message is in `run_single.py`. The algorithm used is determined by the `mode` parameter.
-
-
-## Citation
-
+```bash
+git clone https://github.com/example/neuralsteganography.git
+cd NeuralSteganography
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
 ```
-@inproceedings{ziegler-etal-2019-neural,
-    title = "Neural Linguistic Steganography",
-    author = "Ziegler, Zachary  and
-      Deng, Yuntian  and
-      Rush, Alexander",
-    editor = "Inui, Kentaro  and
-      Jiang, Jing  and
-      Ng, Vincent  and
-      Wan, Xiaojun",
-    booktitle = "Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)",
-    month = nov,
-    year = "2019",
-    address = "Hong Kong, China",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/D19-1115/",
-    doi = "10.18653/v1/D19-1115",
-    pages = "1210--1215",
-    abstract = "Whereas traditional cryptography encrypts a secret message into an unintelligible form, steganography conceals that communication is taking place by encoding a secret message into a cover signal. Language is a particularly pragmatic cover signal due to its benign occurrence and independence from any one medium. Traditionally, linguistic steganography systems encode secret messages in existing text via synonym substitution or word order rearrangements. Advances in neural language models enable previously impractical generation-based techniques. We propose a steganography technique based on arithmetic coding with large-scale neural language models. We find that our approach can generate realistic looking cover sentences as evaluated by humans, while at the same time preserving security by matching the cover message distribution with the language model distribution."
-}
+
+۲. آماده‌سازی فایل‌های محیطی و پوشه‌ها:
+
+```bash
+bash scripts/setup_env.sh
 ```
+
+۳. دریافت مدل‌ها (پیش‌فرض: `HooshvareLab/gpt2-fa`):
+
+```bash
+python scripts/download_models.py --target models
+```
+
+۴. بررسی سلامت محیط:
+
+```bash
+neuralstego doctor
+```
+
+۵. اجرای تست دود CLI:
+
+```bash
+bash scripts/smoke_test_cli.sh
+```
+
+> **نکته:** اگر از ویندوز استفاده می‌کنید، معادل‌های PowerShell (`.\venv\Scripts\Activate.ps1`) و اجرای اسکریپت‌ها از طریق `bash` در WSL پیشنهاد می‌شود.
+
+## استفاده از دستورات Make
+برای خودکارسازی مراحل بالا می‌توانید از دستورات زیر استفاده کنید:
+
+```bash
+make install   # ایجاد venv و نصب editable
+make setup     # اجرای scripts/setup_env.sh
+make doctor    # اجرای neuralstego doctor داخل venv
+make smoke     # اجرای smoke_test_cli.sh پس از doctor
+```
+
+## ساختار معماری و فازها
+- **فاز ۰: اسکلت پروژه** — تنظیم ساختار پوشه‌ها، ابزارهای توسعه، راهنمای عامل‌ها.
+- **فاز ۱: CLI و زیرسیستم‌ها** — پیاده‌سازی دستورات encode/decode و زیرساخت‌های دکتورینگ.
+- **فاز ۲: ادغام مدل‌های NLP** — اتصال GPT2-fa، مدیریت Tokenizer و بهینه‌سازی استنتاج.
+- **فاز ۳: رمزنگاری و امنیت** — افزودن لایه‌های AES/AEAD و کنترل کلیدها.
+- **فاز ۴: کیفیت و استقرار** — تست‌های پیشرفته، CI/CD، بسته‌بندی و انتشار.
+
+در هر فاز، تعریف Done شامل گذر از تست‌ها (unit/cli)، lint (`ruff`) و بررسی type (`mypy`) به همراه به‌روزرسانی مستندات است.
+
+## مسیرهای بعدی
+- مطالعهٔ فایل [AGENT.md](AGENT.md) برای راهنمای پرامت‌دهی عامل‌ها.
+- تکمیل `scripts/download_models.py` با پشتیبانی از کش و کنترل نسخهٔ مدل.
+- پیاده‌سازی کامل لایهٔ encode/decode با رمزگذار حسابی و الگوهای تولید متن.
+
+با دنبال‌کردن مراحل فوق باید بتوانید محیط توسعه را در چند دقیقه آماده کنید.
