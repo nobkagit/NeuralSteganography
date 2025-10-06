@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 import numpy as np
-from utils import kl, entropy, is_sent_finish, limit_past, bits2int, int2bits
+from utils import kl, is_sent_finish, limit_past, bits2int, int2bits
 
 # number of bins is 2^block_size
 # each bin contains vocab_size/2^block_size words
@@ -36,8 +36,7 @@ def encode_block(model, enc, message, context, block_size, bin2words, words2bin,
     total_num_for_stats = 0
     total_log_probs = 0
     total_kl = 0 # in bits
-    total_num_sents = 0
-    
+
     with torch.no_grad():
         i = 0
         sent_finish = False

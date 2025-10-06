@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from huffman import HuffmanCoding
-from utils import kl, entropy, is_sent_finish, limit_past
+from utils import kl, is_sent_finish, limit_past
 
 def encode_huffman(model, enc, message, context, bits_per_word, finish_sent=False, device='cuda'):
     length = len(message)
@@ -17,7 +17,6 @@ def encode_huffman(model, enc, message, context, bits_per_word, finish_sent=Fals
     total_num_for_stats = 0
     total_log_probs = 0
     total_kl = 0 # in bits
-    total_num_sents = 0
 
     with torch.no_grad():
         i = 0

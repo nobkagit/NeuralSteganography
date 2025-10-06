@@ -1,4 +1,5 @@
 import heapq
+import os
 from functools import total_ordering
 
 """
@@ -20,7 +21,7 @@ class HeapNode:
         return self.freq < other.freq
 
     def __eq__(self, other):
-        if(other == None):
+        if other is None:
             return False
         if(not isinstance(other, HeapNode)):
             return False
@@ -57,10 +58,10 @@ class HuffmanCoding:
 
 
     def make_codes_helper(self, root, current_code):
-        if(root == None):
+        if root is None:
             return
 
-        if(root.token != None):
+        if root.token is not None:
             self.codes[root.token] = current_code
             self.reverse_mapping[current_code] = root.token
             return
@@ -116,4 +117,3 @@ class HuffmanCoding:
             output.write(decompressed_text)
 
         return output_path
-
