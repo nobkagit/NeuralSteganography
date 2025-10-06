@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuralstego"
+version = "0.1.0"
+description = "Neural steganography CLI toolkit"
+readme = "README.md"
+authors = [
+  { name = "NeuralSteganography Developers" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+dependencies = [
+  "transformers>=4.41.0",
+  "tqdm",
+  "click>=8.1",
+  "pydantic>=2.0",
+  "cryptography",
+  "numpy",
+  "rich",
+  "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov",
+  "mypy",
+  "ruff",
+]
+gpu = [
+  "torch",
+]
+
+[project.scripts]
+neuralstego = "neuralstego.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+extend-exclude = [
+  "arithmetic.py",
+  "block_baseline.py",
+  "huffman.py",
+  "huffman_baseline.py",
+  "run_single.py",
+  "sample.py",
+  "utils.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = false
+pretty = true
