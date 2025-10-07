@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
+
+pytest.importorskip("cryptography.hazmat.primitives.ciphers.aead")
+
 from neuralstego.crypto import api
 
 
