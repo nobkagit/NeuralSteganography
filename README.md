@@ -70,6 +70,19 @@ make smoke  # اجرای اسکریپت smoke (نسخه، doctor، pytest)
 
 در هر فاز، تعریف Done شامل گذر از تست‌ها (unit/cli)، lint (`ruff`) و بررسی type (`mypy`) به همراه به‌روزرسانی مستندات است.
 
+## رمزنگاری مبتنی بر رمز عبور
+CLI اکنون شامل زیر‌فرمان‌های `encrypt` و `decrypt` است که پیام‌ها را با AES-GCM و KDF پیکربندی‌پذیر در قالب JSON ذخیره می‌کنند.
+
+```bash
+# رمزگذاری فایل متنی با رمز عبور و نوشتن خروجی باینری
+neuralstego encrypt -p "Pa$$w0rd" -i message.txt -o message.enc
+
+# رمزگشایی envelope و بازگرداندن متن اصلی
+neuralstego decrypt -p "Pa$$w0rd" -i message.enc -o recovered.txt
+```
+
+هر دو فرمان از `-` برای stdin/stdout پشتیبانی می‌کنند و در صورت نوشتن باینری روی ترمینال اخطار می‌دهند. در صورت عدم تعیین گزینهٔ `--password`، رمز عبور به‌صورت امن از کاربر پرسیده می‌شود.
+
 ## مسیرهای بعدی
 - مطالعهٔ فایل [AGENT.md](AGENT.md) برای راهنمای پرامت‌دهی عامل‌ها.
 - تکمیل `scripts/download_models.py` با کنترل نسخه و گزارش دقیق ظرفیت کش.

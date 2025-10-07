@@ -1,114 +1,75 @@
-"""Authenticated encryption with associated data (AEAD) helpers."""
+"""AES-GCM based authenticated encryption helpers."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from secrets import token_bytes
+from os import urandom
 from typing import Final
 
-from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .errors import AEADError
-
 __all__ = [
-    "AEADCiphertext",
-    "DEFAULT_KEY_SIZE",
-    "DEFAULT_NONCE_SIZE",
-    "DEFAULT_TAG_SIZE",
-    "decrypt",
-    "encrypt",
-    "generate_key",
+    "NONCE_SIZE",
+    "TAG_SIZE",
+    "aes_gcm_decrypt",
+    "aes_gcm_encrypt",
 ]
 
-DEFAULT_KEY_SIZE: Final[int] = 32
-DEFAULT_NONCE_SIZE: Final[int] = 12
-DEFAULT_TAG_SIZE: Final[int] = 16
-_VALID_KEY_SIZES: Final[tuple[int, ...]] = (16, 24, 32)
+NONCE_SIZE: Final[int] = 12
+TAG_SIZE: Final[int] = 16
 
 
-@dataclass(frozen=True)
-class AEADCiphertext:
-    """Container for AEAD ciphertext components."""
+def _split_ciphertext(data: bytes) -> tuple[bytes, bytes]:
+    """Split ``data`` into ciphertext and authentication tag segments."""
 
-    nonce: bytes
-    ciphertext: bytes
-    tag: bytes
-
-
-def _validate_key_size(size: int) -> None:
-    """Ensure the provided key size is valid for AES-GCM."""
-
-    if size not in _VALID_KEY_SIZES:
-        allowed = ", ".join(str(value) for value in _VALID_KEY_SIZES)
-        raise AEADError(f"AES-GCM key size must be one of: {allowed} bytes.")
+    if len(data) < TAG_SIZE:
+        raise ValueError("Ciphertext is shorter than the authentication tag length.")
+    return data[:-TAG_SIZE], data[-TAG_SIZE:]
 
 
-def _ensure_lengths(ciphertext: AEADCiphertext) -> None:
-    """Validate the nonce and authentication tag sizes."""
-
-    if len(ciphertext.nonce) != DEFAULT_NONCE_SIZE:
-        raise AEADError(
-            f"AES-GCM nonce must be {DEFAULT_NONCE_SIZE} bytes, "
-            f"got {len(ciphertext.nonce)}.",
-        )
-    if len(ciphertext.tag) != DEFAULT_TAG_SIZE:
-        raise AEADError(
-            f"AES-GCM tag must be {DEFAULT_TAG_SIZE} bytes, got {len(ciphertext.tag)}."
-        )
-
-
-def generate_key(size: int = DEFAULT_KEY_SIZE) -> bytes:
-    """Return a new random AEAD key."""
-
-    _validate_key_size(size)
-    return token_bytes(size)
-
-
-def _initialise_cipher(key: bytes) -> AESGCM:
-    """Return an :class:`AESGCM` instance for ``key`` or raise :class:`AEADError`."""
-
-    try:
-        _validate_key_size(len(key))
-        return AESGCM(key)
-    except ValueError as exc:  # pragma: no cover - defensive, AESGCM already validates
-        raise AEADError("Failed to initialise AES-GCM cipher.") from exc
-
-
-def encrypt(
+def aes_gcm_encrypt(
     key: bytes,
     plaintext: bytes,
     *,
-    associated_data: bytes | None = None,
+    aad: bytes = b"",
     nonce: bytes | None = None,
-) -> AEADCiphertext:
-    """Encrypt ``plaintext`` using AES-256-GCM."""
+) -> tuple[bytes, bytes, bytes]:
+    """Encrypt ``plaintext`` using AES-GCM.
 
-    nonce_bytes = nonce or token_bytes(DEFAULT_NONCE_SIZE)
-    if len(nonce_bytes) != DEFAULT_NONCE_SIZE:
-        raise AEADError(
-            f"AES-GCM nonce must be {DEFAULT_NONCE_SIZE} bytes, got {len(nonce_bytes)}."
-        )
+    The nonce must be ``NONCE_SIZE`` (12) bytes long. If omitted, a secure random nonce
+    is generated with :func:`os.urandom`. All inputs and outputs are raw ``bytes``.
+    """
 
-    cipher = _initialise_cipher(key)
-    ciphertext_with_tag = cipher.encrypt(nonce_bytes, plaintext, associated_data)
-    ciphertext = ciphertext_with_tag[:-DEFAULT_TAG_SIZE]
-    tag = ciphertext_with_tag[-DEFAULT_TAG_SIZE:]
-    return AEADCiphertext(nonce=nonce_bytes, ciphertext=ciphertext, tag=tag)
+    nonce_bytes = nonce if nonce is not None else urandom(NONCE_SIZE)
+    if len(nonce_bytes) != NONCE_SIZE:
+        raise ValueError(f"AES-GCM nonce must be {NONCE_SIZE} bytes long.")
+
+    cipher = AESGCM(key)
+    ciphertext_with_tag = cipher.encrypt(nonce_bytes, plaintext, aad or None)
+    ciphertext, tag = _split_ciphertext(ciphertext_with_tag)
+    return ciphertext, nonce_bytes, tag
 
 
-def decrypt(
+def aes_gcm_decrypt(
     key: bytes,
-    ciphertext: AEADCiphertext,
+    ciphertext: bytes,
+    nonce: bytes,
+    tag: bytes,
     *,
-    associated_data: bytes | None = None,
+    aad: bytes = b"",
 ) -> bytes:
-    """Decrypt ``ciphertext`` previously produced by :func:`encrypt`."""
+    """Decrypt ``ciphertext`` produced by :func:`aes_gcm_encrypt`.
 
-    _ensure_lengths(ciphertext)
-    cipher = _initialise_cipher(key)
-    data = ciphertext.ciphertext + ciphertext.tag
-    try:
-        return cipher.decrypt(ciphertext.nonce, data, associated_data)
-    except InvalidTag as exc:
-        raise AEADError("Failed to authenticate ciphertext.") from exc
+    ``nonce`` must be ``NONCE_SIZE`` bytes and ``tag`` must be ``TAG_SIZE`` bytes. The
+    function returns the recovered plaintext and propagates exceptions from
+    :class:`cryptography.hazmat.primitives.ciphers.aead.AESGCM` directly.
+    """
+
+    if len(nonce) != NONCE_SIZE:
+        raise ValueError(f"AES-GCM nonce must be {NONCE_SIZE} bytes long.")
+    if len(tag) != TAG_SIZE:
+        raise ValueError(f"AES-GCM tag must be {TAG_SIZE} bytes long.")
+
+    cipher = AESGCM(key)
+    combined = ciphertext + tag
+    return cipher.decrypt(nonce, combined, aad or None)
+

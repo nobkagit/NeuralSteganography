@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import platform
+import sys
+from getpass import getpass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,10 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from .crypto import DecryptionError, EncryptionError
+from .crypto.api import decrypt_message, encrypt_message
+from .crypto.envelope import unpack_envelope
+from .crypto.errors import EnvelopeError
 from .utils import configure_logging
 
 console = Console()
@@ -36,6 +42,45 @@ def main(log_level: str | None) -> None:
     """Entry point for the neuralstego command-line interface."""
 
     configure_logging(log_level)
+
+
+def _read_bytes(path: str) -> bytes:
+    if path == "-":
+        try:
+            return sys.stdin.buffer.read()
+        except OSError as exc:  # pragma: no cover - defensive
+            raise RuntimeError(f"Failed to read from stdin: {exc}") from exc
+    try:
+        return Path(path).read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Failed to read input file: {exc}") from exc
+
+
+def _write_bytes(path: str, data: bytes) -> None:
+    if path == "-":
+        if sys.stdout.isatty():
+            console.print("[bold yellow]Warning:[/] writing binary data to the terminal.")
+        try:
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        except OSError as exc:  # pragma: no cover - defensive
+            raise RuntimeError(f"Failed to write to stdout: {exc}") from exc
+        return
+    try:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(data)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write output file: {exc}") from exc
+
+
+def _resolve_password(password: str | None) -> str:
+    return password if password is not None else getpass("Password: ")
+
+
+def _handle_cli_error(message: str) -> None:
+    console.print(f"[bold red]Error:[/] {message}")
+    raise click.Abort()
 
 
 @main.command()
@@ -174,6 +219,132 @@ def decode(stego: Path, context: Path, mode: str, model: str) -> None:
 
 
 @main.command()
+@click.option(
+    "-i",
+    "--in",
+    "input_path",
+    type=str,
+    required=True,
+    help="Input path or '-' for stdin.",
+)
+@click.option(
+    "-o",
+    "--out",
+    "output_path",
+    type=str,
+    default="-",
+    show_default=True,
+    help="Output path or '-' for stdout.",
+)
+@click.option(
+    "-p",
+    "--password",
+    type=str,
+    default=None,
+    help="Password to use; prompts securely if omitted.",
+)
+@click.option(
+    "--kdf",
+    type=click.Choice(["argon2id", "pbkdf2"], case_sensitive=False),
+    default="argon2id",
+    show_default=True,
+    help="Key-derivation function to use.",
+)
+@click.option(
+    "--aad",
+    type=str,
+    default=None,
+    help="Optional additional authenticated data (UTF-8 string).",
+)
+def encrypt(
+    input_path: str,
+    output_path: str,
+    password: str | None,
+    kdf: str,
+    aad: str | None,
+) -> None:
+    """Encrypt a message into a JSON envelope."""
+
+    password_value = _resolve_password(password)
+    aad_bytes = aad.encode("utf-8") if aad is not None else b""
+
+    try:
+        payload = _read_bytes(input_path)
+        blob = encrypt_message(payload, password_value, aad=aad_bytes, kdf_method=kdf)
+        _write_bytes(output_path, blob)
+    except (EncryptionError, RuntimeError) as exc:
+        _handle_cli_error(str(exc))
+
+
+@main.command()
+@click.option(
+    "-i",
+    "--in",
+    "input_path",
+    type=str,
+    required=True,
+    help="Envelope path or '-' for stdin.",
+)
+@click.option(
+    "-o",
+    "--out",
+    "output_path",
+    type=str,
+    default="-",
+    show_default=True,
+    help="Output path or '-' for stdout.",
+)
+@click.option(
+    "-p",
+    "--password",
+    type=str,
+    default=None,
+    help="Password to use; prompts securely if omitted.",
+)
+@click.option(
+    "--kdf",
+    type=str,
+    default=None,
+    help="Optional KDF name expectation for validation.",
+)
+@click.option(
+    "--aad",
+    type=str,
+    default=None,
+    help="Optional expected AAD string for validation.",
+)
+def decrypt(
+    input_path: str,
+    output_path: str,
+    password: str | None,
+    kdf: str | None,
+    aad: str | None,
+) -> None:
+    """Decrypt a JSON envelope back into plaintext."""
+
+    password_value = _resolve_password(password)
+
+    try:
+        blob = _read_bytes(input_path)
+        if aad is not None or kdf is not None:
+            try:
+                _, _, _, meta, aad_bytes, _ = unpack_envelope(blob)
+            except EnvelopeError as exc:
+                raise DecryptionError(str(exc)) from exc
+            if kdf is not None and meta.get("name") != kdf:
+                raise DecryptionError("Envelope KDF does not match the expected value.")
+            if aad is not None:
+                expected = aad.encode("utf-8")
+                actual = aad_bytes or b""
+                if actual != expected:
+                    raise DecryptionError("Envelope AAD does not match the expected value.")
+        plaintext = decrypt_message(blob, password_value)
+        _write_bytes(output_path, plaintext)
+    except (DecryptionError, RuntimeError) as exc:
+        _handle_cli_error(str(exc))
+
+
+@main.command()
 def doctor() -> None:
     """Check the execution environment for common dependencies."""
 
@@ -219,3 +390,7 @@ def _import_with_version_hint(module_name: str, install_hint: str) -> tuple[bool
 
     version = getattr(module, "__version__", "unknown version")
     return True, f"Version {version}"
+
+
+if __name__ == "__main__":
+    main()

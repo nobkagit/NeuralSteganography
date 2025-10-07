@@ -1,57 +1,31 @@
-"""Key-derivation functions and helpers."""
+"""Key-derivation helpers for transforming passwords into symmetric keys."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from hashlib import pbkdf2_hmac
 from importlib import import_module
 from importlib.util import find_spec
-from secrets import token_bytes
+from os import urandom
 from typing import Any, Final, Literal, Protocol, runtime_checkable
 
 from .errors import KDFError
 
 __all__ = [
-    "Argon2idParams",
-    "PBKDF2Params",
-    "KDFBackend",
+    "KDFMethod",
+    "derive_key_argon2id",
+    "derive_key_pbkdf2",
     "derive_key",
-    "generate_salt",
+    "gen_salt",
 ]
 
+DEFAULT_KEY_LENGTH: Final[int] = 32
 DEFAULT_SALT_SIZE: Final[int] = 16
-
-KDFBackend = Literal["argon2id", "pbkdf2"]
-
-
-@dataclass(frozen=True)
-class Argon2idParams:
-    """Tunable parameters for the Argon2id key derivation function."""
-
-    time_cost: int = 4
-    """Number of iterations (the ``t`` parameter)."""
-
-    memory_cost: int = 102_400
-    """Memory usage in kibibytes (the ``m`` parameter)."""
-
-    parallelism: int = 8
-    """Number of parallel lanes (the ``p`` parameter)."""
-
-
-@dataclass(frozen=True)
-class PBKDF2Params:
-    """Parameters controlling PBKDF2 when Argon2id is unavailable."""
-
-    iterations: int = 600_000
-    """Number of iterations for PBKDF2."""
-
-    hash_name: Literal["sha256", "sha512"] = "sha256"
-    """Digest algorithm to use with PBKDF2."""
+KDFMethod = Literal["argon2id", "pbkdf2"]
 
 
 @runtime_checkable
 class _Argon2HashFn(Protocol):
-    """Runtime protocol describing the :mod:`argon2.low_level` API we consume."""
+    """Runtime protocol describing :func:`argon2.low_level.hash_secret_raw`."""
 
     def __call__(
         self,
@@ -68,7 +42,7 @@ class _Argon2HashFn(Protocol):
 
 
 def _load_argon2() -> tuple[_Argon2HashFn | None, Any]:
-    """Load Argon2 primitives if available, otherwise return ``(None, None)``."""
+    """Return the Argon2 raw hash function and type if the dependency exists."""
 
     if find_spec("argon2") is None or find_spec("argon2.low_level") is None:
         return None, None
@@ -84,46 +58,86 @@ def _load_argon2() -> tuple[_Argon2HashFn | None, Any]:
 _HASH_SECRET_RAW, _ARGON2_TYPE_ID = _load_argon2()
 
 
-def generate_salt(size: int = DEFAULT_SALT_SIZE) -> bytes:
-    """Return a cryptographically secure random salt of ``size`` bytes."""
+def _ensure_positive(value: int, name: str) -> None:
+    """Ensure ``value`` is positive, raising :class:`KDFError` otherwise."""
 
-    if size <= 0:
-        raise KDFError("Salt size must be a positive integer.")
-    return token_bytes(size)
+    if value <= 0:
+        raise KDFError(f"{name} must be a positive integer.")
+
+
+def _normalise_password(password: str) -> bytes:
+    """Encode ``password`` into a UTF-8 byte string."""
+
+    return password.encode("utf-8")
+
+
+def gen_salt(size: int = DEFAULT_SALT_SIZE) -> bytes:
+    """Return a cryptographically strong random salt of ``size`` bytes."""
+
+    _ensure_positive(size, "Salt size")
+    return urandom(size)
+
+
+def derive_key_argon2id(
+    password: str,
+    salt: bytes,
+    *,
+    length: int = DEFAULT_KEY_LENGTH,
+    time_cost: int = 3,
+    memory_cost: int = 64 * 1024,
+    parallelism: int = 2,
+) -> bytes:
+    """Derive a key using Argon2id with configurable but safe defaults."""
+
+    if _HASH_SECRET_RAW is None or _ARGON2_TYPE_ID is None:
+        raise KDFError("Argon2id backend requested but argon2-cffi is unavailable.")
+
+    _ensure_positive(length, "Key length")
+    _ensure_positive(time_cost, "time_cost")
+    _ensure_positive(memory_cost, "memory_cost")
+    _ensure_positive(parallelism, "parallelism")
+
+    password_bytes = _normalise_password(password)
+    return _HASH_SECRET_RAW(
+        password_bytes,
+        salt,
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=length,
+        type=_ARGON2_TYPE_ID,
+    )
+
+
+def derive_key_pbkdf2(
+    password: str,
+    salt: bytes,
+    *,
+    length: int = DEFAULT_KEY_LENGTH,
+    iterations: int = 310_000,
+    hash_name: Literal["sha256", "sha512"] = "sha256",
+) -> bytes:
+    """Derive a key using PBKDF2-HMAC as a portable fallback mechanism."""
+
+    _ensure_positive(length, "Key length")
+    _ensure_positive(iterations, "iterations")
+
+    password_bytes = _normalise_password(password)
+    return pbkdf2_hmac(hash_name, password_bytes, salt, iterations, dklen=length)
 
 
 def derive_key(
-    secret: bytes,
+    password: str,
     salt: bytes,
-    *,
-    length: int,
-    backend: KDFBackend | None = None,
-    argon2_params: Argon2idParams | None = None,
-    pbkdf2_params: PBKDF2Params | None = None,
+    method: KDFMethod = "argon2id",
+    **kwargs: Any,
 ) -> bytes:
-    """Derive a symmetric key using the requested backend."""
+    """Derive a key using the requested method, defaulting to Argon2id."""
 
-    if length <= 0:
-        raise KDFError("Derived key length must be positive.")
-    chosen_backend: KDFBackend
-    if backend is not None:
-        chosen_backend = backend
-    else:
-        chosen_backend = "argon2id" if _HASH_SECRET_RAW is not None else "pbkdf2"
-
-    if chosen_backend == "argon2id":
-        if _HASH_SECRET_RAW is None or _ARGON2_TYPE_ID is None:
-            raise KDFError("Argon2id backend requested but argon2-cffi is unavailable.")
-        params = argon2_params or Argon2idParams()
-        return _HASH_SECRET_RAW(
-            secret,
-            salt,
-            time_cost=params.time_cost,
-            memory_cost=params.memory_cost,
-            parallelism=params.parallelism,
-            hash_len=length,
-            type=_ARGON2_TYPE_ID,
-        )
-
-    params = pbkdf2_params or PBKDF2Params()
-    return pbkdf2_hmac(params.hash_name, secret, salt, params.iterations, dklen=length)
+    if method == "argon2id":
+        if _HASH_SECRET_RAW is not None and _ARGON2_TYPE_ID is not None:
+            return derive_key_argon2id(password, salt, **kwargs)
+        return derive_key_pbkdf2(password, salt, **kwargs)
+    if method == "pbkdf2":
+        return derive_key_pbkdf2(password, salt, **kwargs)
+    raise KDFError(f"Unsupported KDF method: {method}")

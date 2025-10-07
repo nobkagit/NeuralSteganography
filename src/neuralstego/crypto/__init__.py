@@ -1,27 +1,36 @@
-"""Cryptographic primitives and helpers for :mod:`neuralstego`."""
+"""Convenience exports for the cryptography helpers."""
 
-from . import api
-from .aead import AEADCiphertext, decrypt, encrypt, generate_key
-from .envelope import Envelope, EnvelopeComponents, open_envelope, seal_envelope
-from .errors import AEADError, CryptoError, EnvelopeError, KDFError
-from .kdf import Argon2idParams, PBKDF2Params, derive_key, generate_salt
+from __future__ import annotations
+
+from .aead import NONCE_SIZE, TAG_SIZE, aes_gcm_decrypt, aes_gcm_encrypt
+from .api import decrypt_message, encrypt_message
+from .envelope import ENVELOPE_VERSION, pack_envelope, unpack_envelope
+from .errors import DecryptionError, EncryptionError, EnvelopeError, KDFError
+from .kdf import (
+    KDFMethod,
+    derive_key,
+    derive_key_argon2id,
+    derive_key_pbkdf2,
+    gen_salt,
+)
 
 __all__ = [
-    "AEADCiphertext",
-    "AEADError",
-    "Argon2idParams",
-    "CryptoError",
-    "Envelope",
-    "EnvelopeComponents",
+    "NONCE_SIZE",
+    "TAG_SIZE",
+    "DecryptionError",
+    "EncryptionError",
     "EnvelopeError",
     "KDFError",
-    "PBKDF2Params",
-    "api",
-    "decrypt",
+    "KDFMethod",
+    "aes_gcm_decrypt",
+    "aes_gcm_encrypt",
+    "decrypt_message",
     "derive_key",
-    "encrypt",
-    "generate_key",
-    "generate_salt",
-    "open_envelope",
-    "seal_envelope",
+    "derive_key_argon2id",
+    "derive_key_pbkdf2",
+    "encrypt_message",
+    "gen_salt",
+    "pack_envelope",
+    "unpack_envelope",
+    "ENVELOPE_VERSION",
 ]
