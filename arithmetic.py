@@ -1,10 +1,53 @@
+"""Utilities for arithmetic coding over language model distributions."""
+
+from typing import Any, List, Sequence, Tuple
+
 import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
 
-from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg
+from utils import bits2int, entropy, int2bits, is_sent_finish, kl, limit_past, num_same_from_beg
 
-def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=50000):
+
+def _select_cutoff_k(probs: torch.Tensor, threshold: float, topk: int) -> int:
+    """Return the number of tokens to keep when rounding probabilities.
+
+    The original implementation assumed that at least one probability would fall
+    below the current precision threshold. When this assumption is violated the
+    lookup of the first index raises an ``IndexError``. This helper guards that
+    lookup and falls back to keeping the entire distribution.
+
+    Args:
+        probs: Sorted probability distribution for the next token.
+        threshold: Minimum probability mass that can be represented with the
+            current arithmetic coding interval.
+        topk: Upper bound on the number of tokens retained.
+
+    Returns:
+        The number of tokens that should be preserved for further processing.
+    """
+
+    cutoff_indices = torch.nonzero(probs < threshold, as_tuple=False)
+    if cutoff_indices.numel() == 0:
+        candidate = probs.size(0)
+    else:
+        candidate = cutoff_indices[0].item()
+
+    return min(max(2, candidate), topk)
+
+
+def encode_arithmetic(
+    model: Any,
+    enc: Any,
+    message: Sequence[int],
+    context: Sequence[int],
+    finish_sent: bool = False,
+    device: str = 'cuda',
+    temp: float = 1.0,
+    precision: int = 16,
+    topk: int = 50000,
+) -> Tuple[List[int], float, float, float, float]:
+    """Encode a bit-stream into tokens via arithmetic coding."""
     context = torch.tensor(context[-1022:], device=device, dtype=torch.long)
 
     max_val = 2**precision
@@ -49,7 +92,7 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 # Cutoff low probabilities that would be rounded to 0
                 cur_int_range = cur_interval[1]-cur_interval[0]
                 cur_threshold = 1/cur_int_range
-                k = min(max(2, (probs_temp < cur_threshold).nonzero()[0].item()), topk)
+                k = _select_cutoff_k(probs_temp, cur_threshold, topk)
                 probs_temp_int = probs_temp[:k] # Cutoff all but top k
 
                 # Rescale to correct range
@@ -126,7 +169,18 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
 
     return output[len(context):].tolist(), avg_NLL, avg_KL, words_per_bit, avg_Hq
 
-def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=50000):
+
+def decode_arithmetic(
+    model: Any,
+    enc: Any,
+    text: str,
+    context: Sequence[int],
+    device: str = 'cuda',
+    temp: float = 1.0,
+    precision: int = 16,
+    topk: int = 50000,
+) -> List[int]:
+    """Decode tokens into the embedded bit-stream using arithmetic coding."""
     # inp is a list of token indices
     # context is a list of token indices
     inp = enc.encode(text)
@@ -168,7 +222,7 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             # Cutoff low probabilities that would be rounded to 0
             cur_int_range = cur_interval[1]-cur_interval[0]
             cur_threshold = 1/cur_int_range
-            k = min(max(2, (probs_temp < cur_threshold).nonzero()[0].item()), topk)
+            k = _select_cutoff_k(probs_temp, cur_threshold, topk)
             probs_temp_int = probs_temp[:k] # Cutoff all but top k
 
             # Rescale to correct range
