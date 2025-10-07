@@ -1,26 +1,26 @@
-"""Exception hierarchy for the :mod:`neuralstego.crypto` package."""
+"""Exception types raised by :mod:`neuralstego.crypto` helpers."""
 
 from __future__ import annotations
 
 __all__ = [
-    "CryptoError",
-    "KDFError",
-    "AEADError",
+    "EncryptionError",
+    "DecryptionError",
     "EnvelopeError",
+    "KDFError",
 ]
 
 
-class CryptoError(Exception):
-    """Base exception for all cryptographic failures within the project."""
+class EncryptionError(Exception):
+    """Raised when a plaintext cannot be encrypted successfully."""
 
 
-class KDFError(CryptoError):
-    """Raised when a key-derivation operation fails or misbehaves."""
+class DecryptionError(Exception):
+    """Raised when a ciphertext blob cannot be decrypted."""
 
 
-class AEADError(CryptoError):
-    """Raised for authenticated encryption and decryption errors."""
+class EnvelopeError(Exception):
+    """Raised when packing or unpacking an envelope fails."""
 
 
-class EnvelopeError(CryptoError):
-    """Raised when envelope encryption orchestration fails."""
+class KDFError(Exception):
+    """Raised when key derivation parameters or execution are invalid."""

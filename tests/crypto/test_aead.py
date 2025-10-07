@@ -1,46 +1,65 @@
-"""Tests for the AEAD helpers."""
+"""Tests for the AES-GCM helpers."""
 
 from __future__ import annotations
 
 import pytest
+from cryptography.exceptions import InvalidTag
+
+from neuralstego.crypto.aead import (
+    NONCE_SIZE,
+    TAG_SIZE,
+    aes_gcm_decrypt,
+    aes_gcm_encrypt,
+)
 
 
-pytest.importorskip("cryptography.hazmat.primitives.ciphers.aead")
+def _fixed_key() -> bytes:
+    return bytes(range(32))
 
-from neuralstego.crypto import aead
+
+def test_encrypt_decrypt_roundtrip_without_aad() -> None:
+    plaintext = b"neuralstego-secret"
+    key = _fixed_key()
+
+    ciphertext, nonce, tag = aes_gcm_encrypt(key, plaintext)
+
+    assert len(nonce) == NONCE_SIZE
+    assert len(tag) == TAG_SIZE
+    assert aes_gcm_decrypt(key, ciphertext, nonce, tag) == plaintext
 
 
-def test_encrypt_decrypt_roundtrip() -> None:
-    """Encryption and decryption round-trip with authenticated data."""
+def test_encrypt_decrypt_with_aad() -> None:
+    plaintext = b"authenticated"
+    aad = b"metadata"
+    key = _fixed_key()
 
-    key = aead.generate_key()
-    associated_data = b"neuralstego"
-    plaintext = b"secret payload"
-    ciphertext = aead.encrypt(key, plaintext, associated_data=associated_data)
+    ciphertext, nonce, tag = aes_gcm_encrypt(key, plaintext, aad=aad)
+    recovered = aes_gcm_decrypt(key, ciphertext, nonce, tag, aad=aad)
+    assert recovered == plaintext
 
-    assert len(ciphertext.nonce) == aead.DEFAULT_NONCE_SIZE
-    assert len(ciphertext.tag) == aead.DEFAULT_TAG_SIZE
-    assert aead.decrypt(key, ciphertext, associated_data=associated_data) == plaintext
+
+def test_encrypt_with_supplied_nonce_is_deterministic() -> None:
+    plaintext = b"deterministic"
+    key = _fixed_key()
+    nonce = b"\x01" * NONCE_SIZE
+
+    first = aes_gcm_encrypt(key, plaintext, nonce=nonce)
+    second = aes_gcm_encrypt(key, plaintext, nonce=nonce)
+    assert first == second
+
+
+def test_decrypt_raises_on_tag_tamper() -> None:
+    key = _fixed_key()
+    plaintext = b"tamper"
+    ciphertext, nonce, tag = aes_gcm_encrypt(key, plaintext)
+    bad_tag = bytes(~b & 0xFF for b in tag)
+
+    with pytest.raises(InvalidTag):
+        aes_gcm_decrypt(key, ciphertext, nonce, bad_tag)
 
 
 def test_encrypt_rejects_invalid_nonce_length() -> None:
-    """Non-standard nonce sizes are rejected to avoid misuse."""
+    key = _fixed_key()
+    with pytest.raises(ValueError):
+        aes_gcm_encrypt(key, b"data", nonce=b"short")
 
-    key = aead.generate_key()
-    with pytest.raises(aead.AEADError):
-        aead.encrypt(key, b"data", nonce=b"short")
-
-
-def test_decrypt_rejects_tampered_tag() -> None:
-    """Tag tampering raises an :class:`AEADError`."""
-
-    key = aead.generate_key()
-    ciphertext = aead.encrypt(key, b"plaintext")
-    corrupted = aead.AEADCiphertext(
-        nonce=ciphertext.nonce,
-        ciphertext=ciphertext.ciphertext,
-        tag=b"\x00" * len(ciphertext.tag),
-    )
-
-    with pytest.raises(aead.AEADError):
-        aead.decrypt(key, corrupted)
