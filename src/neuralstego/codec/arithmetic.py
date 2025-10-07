@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Mapping, MutableMapping, Sequence, Tuple
 
+import math
 import numpy as np
 
 from .errors import ArithmeticRangeError, DecodeDivergenceError
-from .types import CodecState, ProbDist
+from .quality import apply_quality, cap_bits_per_token
+from .types import CodecState, LMProvider, ProbDist
 
 _FRACTION_LIMIT = 1 << 30
 """Maximum denominator when converting floating probabilities to fractions."""
@@ -117,6 +119,118 @@ class BitWriter:
         return bytes(output)
 
 
+def encode_with_lm(
+    bits: bytes,
+    lm: LMProvider,
+    *,
+    context: Sequence[int] | None = None,
+    quality: Mapping[str, object] | None = None,
+    state: MutableMapping[str, object] | None = None,
+    max_context: int | None = None,
+) -> list[int]:
+    """Encode a payload using probability distributions from ``lm``."""
+
+    reader = BitReader(bits)
+    total_bits = reader.total_bits
+    if total_bits == 0:
+        if state is not None:
+            state["history"] = tuple()
+            state["residual_bits"] = (0).to_bytes(8, byteorder="big", signed=False)
+        return []
+
+    tokens: List[int] = []
+    consumption: List[int] = []
+    context_ids = list(context or [])
+    context_window = _resolve_context_window(lm, max_context)
+
+    while reader.consumed_bits < total_bits:
+        dist = _next_distribution(lm, context_ids, quality, context_window)
+        ranked_tokens, capacity = _rank_tokens(dist)
+        if capacity <= 0:
+            raise ArithmeticRangeError("Language model distribution provides no capacity")
+
+        before = reader.consumed_bits
+        bits_chunk = reader.read(capacity)
+        consumed = min(capacity, reader.consumed_bits - before)
+        index = _bits_to_int(bits_chunk)
+        limit = 1 << capacity
+        if index >= limit:
+            index = limit - 1
+
+        token_id = ranked_tokens[index]
+        tokens.append(token_id)
+        consumption.append(consumed)
+        context_ids.append(token_id)
+
+    if state is not None:
+        state["history"] = tuple(consumption)
+        state["residual_bits"] = total_bits.to_bytes(8, byteorder="big", signed=False)
+
+    return tokens
+
+
+def decode_with_lm(
+    tokens: Sequence[int],
+    lm: LMProvider,
+    *,
+    context: Sequence[int] | None = None,
+    quality: Mapping[str, object] | None = None,
+    state: MutableMapping[str, object] | None = None,
+    max_context: int | None = None,
+) -> bytes:
+    """Decode tokens produced by :func:`encode_with_lm`."""
+
+    if not tokens:
+        return b""
+
+    history: Sequence[int] | None = None
+    total_bits: int | None = None
+    if state is not None:
+        history = state.get("history")  # type: ignore[assignment]
+        residual = state.get("residual_bits")
+        if residual:
+            total_bits = int.from_bytes(residual, byteorder="big", signed=False)
+
+    if history is None or len(history) < len(tokens):
+        raise DecodeDivergenceError("Bit consumption history is required for decoding")
+
+    consumption = list(history[: len(tokens)])
+    remaining_history = list(history[len(tokens) :])
+
+    writer = BitWriter()
+    context_ids = list(context or [])
+    context_window = _resolve_context_window(lm, max_context)
+
+    for index, token_id in enumerate(tokens):
+        dist = _next_distribution(lm, context_ids, quality, context_window)
+        ranked_tokens, capacity = _rank_tokens(dist)
+        if capacity <= 0:
+            raise DecodeDivergenceError("Language model distribution provides no capacity")
+
+        try:
+            token_index = ranked_tokens.index(token_id)
+        except ValueError as exc:  # pragma: no cover - defensive guard
+            raise DecodeDivergenceError(f"Token {token_id} not present in distribution") from exc
+
+        emitted = _int_to_bits(token_index, capacity)
+        writer.write_bits(emitted[: consumption[index]])
+        context_ids.append(token_id)
+
+    if state is not None:
+        if remaining_history:
+            state["history"] = tuple(remaining_history)
+        else:
+            state.pop("history", None)
+
+    if total_bits is None:
+        total_bits = writer.bit_length
+
+    if total_bits > writer.bit_length:
+        raise DecodeDivergenceError("Decoded bitstream shorter than expected")
+
+    return writer.to_bytes(bit_length=total_bits)
+
+
 def encode_bits(
     bits: bytes,
     probs: Iterable[ProbDist],
@@ -209,6 +323,86 @@ def decode_bits(
         raise DecodeDivergenceError("Decoded bitstream shorter than expected")
 
     return writer.to_bytes(bit_length=total_bits)
+
+
+def _resolve_context_window(lm: LMProvider, override: int | None) -> int | None:
+    if override is not None and override > 0:
+        return override
+    window = getattr(lm, "context_window", None)
+    if isinstance(window, int) and window > 0:
+        return window
+    return None
+
+
+def _next_distribution(
+    lm: LMProvider,
+    context_ids: List[int],
+    quality: Mapping[str, object] | None,
+    context_window: int | None,
+) -> ProbDist:
+    if context_window is not None and len(context_ids) > context_window:
+        trimmed = context_ids[-context_window:]
+    else:
+        trimmed = context_ids
+    dist = lm.next_token_probs(tuple(trimmed))
+    return _apply_quality(dist, quality)
+
+
+def _apply_quality(dist: ProbDist, quality: Mapping[str, object] | None) -> ProbDist:
+    if not quality:
+        return dist
+
+    filtered = dist
+    if isinstance(quality, Mapping):
+        top_k = quality.get("top_k")
+        top_p = quality.get("top_p")
+        min_prob = quality.get("min_prob")
+        if any(param is not None for param in (top_k, top_p, min_prob)):
+            filtered = apply_quality(filtered, top_k=top_k, top_p=top_p, min_prob=min_prob)
+
+        cap_bits = quality.get("cap_per_token_bits")
+        if cap_bits is not None:
+            filtered = cap_bits_per_token(filtered, int(cap_bits))
+
+    return filtered
+
+
+def _rank_tokens(dist: ProbDist) -> Tuple[List[int], int]:
+    tokens, probs = _dist_to_arrays(dist)
+    mask = probs > 0
+    tokens = tokens[mask]
+    probs = probs[mask]
+    if tokens.size == 0:
+        raise ArithmeticRangeError("Probability distribution must contain positive mass")
+
+    order = np.argsort(probs)[::-1]
+    sorted_tokens = tokens[order]
+    capacity = int(math.floor(math.log2(sorted_tokens.size)))
+    if capacity <= 0:
+        return sorted_tokens.tolist(), 0
+
+    limit = 1 << capacity
+    return sorted_tokens[:limit].tolist(), capacity
+
+
+def _dist_to_arrays(dist: ProbDist) -> Tuple[np.ndarray, np.ndarray]:
+    if isinstance(dist, np.ndarray):
+        tokens = np.arange(dist.size, dtype=np.int64)
+        probs = dist.astype(np.float64, copy=True)
+        return tokens, probs
+    if isinstance(dist, dict):
+        items = sorted(dist.items())
+        tokens = np.array([int(token) for token, _ in items], dtype=np.int64)
+        probs = np.array([float(prob) for _, prob in items], dtype=np.float64)
+        return tokens, probs
+    raise TypeError(f"Unsupported probability distribution type: {type(dist)!r}")
+
+
+def _bits_to_int(bits: Sequence[int]) -> int:
+    value = 0
+    for bit in bits:
+        value = (value << 1) | int(bit)
+    return value
 
 
 def _encode_step(
@@ -364,4 +558,11 @@ def _bytes_to_bits(payload: bytes) -> Tuple[int, ...]:
     return tuple(bits)
 
 
-__all__ = ["BitReader", "BitWriter", "encode_bits", "decode_bits"]
+__all__ = [
+    "BitReader",
+    "BitWriter",
+    "encode_bits",
+    "decode_bits",
+    "encode_with_lm",
+    "decode_with_lm",
+]

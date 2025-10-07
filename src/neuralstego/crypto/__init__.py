@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from .aead import NONCE_SIZE, TAG_SIZE, aes_gcm_decrypt, aes_gcm_encrypt
 from .api import decrypt_message, encrypt_message
+from .arithmetic import decode_with_lm, encode_with_lm
+from .distribution import TransformersLM
 from .envelope import ENVELOPE_VERSION, pack_envelope, unpack_envelope
 from .errors import DecryptionError, EncryptionError, EnvelopeError, KDFError
 from .kdf import (
@@ -33,4 +35,7 @@ __all__ = [
     "pack_envelope",
     "unpack_envelope",
     "ENVELOPE_VERSION",
+    "TransformersLM",
+    "encode_with_lm",
+    "decode_with_lm",
 ]
