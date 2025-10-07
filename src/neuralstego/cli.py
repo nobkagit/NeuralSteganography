@@ -114,7 +114,74 @@ def _handle_cli_error(message: str) -> None:
     raise click.Abort()
 
 
-@main.command(name="codec-encode")
+def _coerce_quality_value(raw_value: str) -> Any:
+    """Convert CLI string values into Python types."""
+
+    lowered = raw_value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+
+    try:
+        return int(raw_value)
+    except ValueError:
+        pass
+
+    try:
+        return float(raw_value)
+    except ValueError:
+        return raw_value
+
+
+def _collect_quality_overrides(ctx: click.Context) -> dict[str, Any]:
+    """Extract ``--quality.*`` overrides forwarded to codec commands."""
+
+    extra_args = list(ctx.args)
+    quality: dict[str, Any] = {}
+    remaining: list[str] = []
+    index = 0
+
+    while index < len(extra_args):
+        token = extra_args[index]
+        if token.startswith("--quality."):
+            suffix = token[len("--quality.") :]
+            if not suffix:
+                raise click.BadOptionUsage(
+                    "quality", "Quality option requires a key after '--quality.'."
+                )
+
+            if "=" in suffix:
+                key, raw = suffix.split("=", 1)
+                if raw == "":
+                    raise click.BadOptionUsage(
+                        key, f"Quality option '{key}' requires a value."
+                    )
+            else:
+                key = suffix
+                index += 1
+                if index >= len(extra_args):
+                    raise click.BadOptionUsage(
+                        key, f"Quality option '{key}' requires a value."
+                    )
+                raw = extra_args[index]
+
+            quality[key] = _coerce_quality_value(raw)
+        else:
+            remaining.append(token)
+        index += 1
+
+    if remaining:
+        raise click.UsageError(
+            "Unexpected extra arguments: " + " ".join(remaining)
+        )
+
+    ctx.args = []
+    return quality
+
+
+@main.command(
+    name="codec-encode",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
 @click.option("-i", "--in", "input_path", type=str, required=True, help="Input bits file.")
 @click.option(
     "-o",
@@ -125,18 +192,30 @@ def _handle_cli_error(message: str) -> None:
     help="Output path for the generated tokens JSON.",
 )
 @click.option("--seed-text", type=str, default="", help="Seed text used to initialise the codec context.")
-def codec_encode(input_path: str, output_path: str, seed_text: str) -> None:
+@click.pass_context
+def codec_encode(
+    ctx: click.Context, input_path: str, output_path: str, seed_text: str
+) -> None:
     """Encode a raw bitstream into placeholder token identifiers using MockLM."""
 
+    quality = _collect_quality_overrides(ctx)
     try:
         payload = _read_bytes(input_path)
-        tokens = encode_text(payload, MockLM(), quality={}, seed_text=seed_text)
+        tokens = encode_text(
+            payload,
+            MockLM(),
+            quality=quality,
+            seed_text=seed_text,
+        )
         _write_tokens(output_path, tokens)
     except RuntimeError as exc:
         _handle_cli_error(str(exc))
 
 
-@main.command(name="codec-decode")
+@main.command(
+    name="codec-decode",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
 @click.option(
     "-i",
     "--in",
@@ -154,12 +233,21 @@ def codec_encode(input_path: str, output_path: str, seed_text: str) -> None:
     help="Output path for the recovered bitstream.",
 )
 @click.option("--seed-text", type=str, default="", help="Seed text used during encoding.")
-def codec_decode(input_path: str, output_path: str, seed_text: str) -> None:
+@click.pass_context
+def codec_decode(
+    ctx: click.Context, input_path: str, output_path: str, seed_text: str
+) -> None:
     """Decode placeholder token identifiers back into the embedded bitstream."""
 
+    quality = _collect_quality_overrides(ctx)
     try:
         tokens = _read_tokens(input_path)
-        payload = decode_text(tokens, MockLM(), quality={}, seed_text=seed_text)
+        payload = decode_text(
+            tokens,
+            MockLM(),
+            quality=quality,
+            seed_text=seed_text,
+        )
         _write_bytes(output_path, payload)
     except (RuntimeError, ValueError) as exc:
         _handle_cli_error(str(exc))
