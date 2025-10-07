@@ -1,16 +1,28 @@
-"""High-level encryption API built on the crypto primitives."""
+"""High-level crypto API including GPT2-fa steganography helpers."""
 
 from __future__ import annotations
 
+import base64
+import json
+from hashlib import sha256
 from importlib.util import find_spec
-from typing import Any, Literal, cast
+from typing import Any, Literal, Mapping, Sequence, cast
 
+from ..codec.distribution import MockLM
+from ..codec.types import CodecState, LMProvider
 from .aead import aes_gcm_decrypt, aes_gcm_encrypt
+from .arithmetic import decode_arithmetic, encode_arithmetic
+from .distribution import TransformersLM
 from .envelope import ENVELOPE_VERSION, pack_envelope, unpack_envelope
 from .errors import DecryptionError, EncryptionError, EnvelopeError, KDFError
 from .kdf import KDFMethod, derive_key, gen_salt
 
-__all__ = ["encrypt_message", "decrypt_message"]
+__all__ = [
+    "decrypt_message",
+    "decode_text",
+    "encode_text",
+    "encrypt_message",
+]
 
 try:
     _ARGON2_AVAILABLE = find_spec("argon2.low_level") is not None
@@ -130,4 +142,148 @@ def decrypt_message(blob: bytes, password: str) -> bytes:
         raise DecryptionError("Failed to decrypt message.") from exc
 
     return plaintext
+
+
+def encode_text(
+    message: str,
+    password: str,
+    *,
+    quality: Mapping[str, object] | None = None,
+    seed_text: str = "",
+) -> bytes:
+    """Encrypt ``message`` and embed it into tokens using GPT2-fa or a fallback."""
+
+    if not isinstance(message, str):
+        raise TypeError("message must be a string")
+    if not isinstance(password, str):
+        raise TypeError("password must be a string")
+
+    quality = dict(quality or {})
+    lm = _resolve_language_model(quality)
+
+    ciphertext = encrypt_message(message.encode("utf-8"), password)
+    context_ids = _seed_to_context(seed_text, lm)
+
+    tokens, state = encode_arithmetic(
+        ciphertext,
+        lm,
+        quality=quality,
+        seed_text=context_ids,
+    )
+
+    payload = {
+        "tokens": list(map(int, tokens)),
+        "history": list(map(int, state.get("history", ()) or ())),
+        "residual_bits": _encode_bytes(state.get("residual_bits", b"")),
+        "seed_checksum": _seed_checksum(seed_text),
+    }
+
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def decode_text(
+    token_stream: bytes | Sequence[int],
+    password: str,
+    *,
+    quality: Mapping[str, object] | None = None,
+    seed_text: str = "",
+) -> str:
+    """Recover an embedded message from ``token_stream`` using the supplied password."""
+
+    if not isinstance(password, str):
+        raise TypeError("password must be a string")
+
+    quality = dict(quality or {})
+    lm = _resolve_language_model(quality)
+
+    if isinstance(token_stream, (bytes, bytearray)):
+        tokens, state, checksum = _deserialize_stream(bytes(token_stream))
+    else:
+        raise TypeError("token_stream must be the serialised bytes produced by encode_text")
+
+    if checksum != _seed_checksum(seed_text):
+        raise ValueError("Seed text does not match the encoded payload")
+
+    context_ids = _seed_to_context(seed_text, lm)
+    plaintext_envelope = decode_arithmetic(
+        tokens,
+        lm,
+        quality=quality,
+        seed_text=context_ids,
+        state=state,
+    )
+    plaintext = decrypt_message(plaintext_envelope, password)
+    return plaintext.decode("utf-8")
+
+
+def _resolve_language_model(quality: Mapping[str, object]) -> LMProvider:
+    candidate = quality.get("lm")
+    if hasattr(candidate, "next_token_probs"):
+        return cast(LMProvider, candidate)
+    if callable(candidate):
+        lm = candidate()
+        if not isinstance(lm, LMProvider):  # pragma: no cover - defensive
+            raise TypeError("Custom LM factory must return an LMProvider instance")
+        return lm
+
+    try:
+        return TransformersLM()
+    except Exception:  # pragma: no cover - fallback path
+        return MockLM()
+
+
+def _seed_to_context(seed_text: str, lm: LMProvider) -> list[int]:
+    if not seed_text:
+        return []
+
+    tokenizer = getattr(lm, "ensure_tokenizer", None)
+    if callable(tokenizer):
+        tok = tokenizer()
+    else:
+        tok = getattr(lm, "tokenizer", None)
+
+    if tok is None:
+        return []
+
+    if hasattr(tok, "encode"):
+        tokens = tok.encode(seed_text, add_special_tokens=False)
+        if not tokens:
+            tokens = tok.encode(seed_text)
+        return list(map(int, tokens))
+
+    if hasattr(tok, "__call__"):
+        result = tok(seed_text)
+        if isinstance(result, Sequence):
+            return [int(value) for value in result]
+
+    return []
+
+
+def _encode_bytes(data: bytes | None) -> str:
+    if not data:
+        return ""
+    return base64.b64encode(bytes(data)).decode("ascii")
+
+
+def _deserialize_stream(payload: bytes) -> tuple[list[int], CodecState, str]:
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive guard
+        raise ValueError("Invalid encoded token stream") from exc
+
+    tokens = [int(token) for token in data.get("tokens", [])]
+    history = [int(value) for value in data.get("history", [])]
+    residual = data.get("residual_bits", "")
+    state: CodecState = {}
+    if history:
+        state["history"] = history
+    if residual:
+        state["residual_bits"] = base64.b64decode(residual)
+
+    checksum = str(data.get("seed_checksum", ""))
+    return tokens, state, checksum
+
+
+def _seed_checksum(seed_text: str) -> str:
+    return sha256(seed_text.encode("utf-8")).hexdigest()
 
