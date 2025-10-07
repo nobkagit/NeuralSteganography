@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import platform
 import sys
 from getpass import getpass
@@ -13,6 +14,8 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from .api import decode_text, encode_text
+from .codec.distribution import MockLM
 from .crypto import DecryptionError, EncryptionError
 from .crypto.api import decrypt_message, encrypt_message
 from .crypto.envelope import unpack_envelope
@@ -74,6 +77,34 @@ def _write_bytes(path: str, data: bytes) -> None:
         raise RuntimeError(f"Failed to write output file: {exc}") from exc
 
 
+def _read_tokens(path: str) -> list[int]:
+    try:
+        if path == "-":
+            raw = sys.stdin.read()
+        else:
+            raw = Path(path).read_text(encoding="utf-8")
+        data = json.loads(raw or "[]")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Failed to read tokens payload: {exc}") from exc
+    if not isinstance(data, list) or not all(isinstance(item, int) for item in data):
+        raise RuntimeError("Token payload must be a JSON array of integers")
+    return list(data)
+
+
+def _write_tokens(path: str, tokens: list[int]) -> None:
+    serialized = json.dumps(tokens)
+    try:
+        if path == "-":
+            sys.stdout.write(serialized + "\n")
+            sys.stdout.flush()
+        else:
+            output_path = Path(path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(serialized + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write tokens payload: {exc}") from exc
+
+
 def _resolve_password(password: str | None) -> str:
     return password if password is not None else getpass("Password: ")
 
@@ -81,6 +112,57 @@ def _resolve_password(password: str | None) -> str:
 def _handle_cli_error(message: str) -> None:
     console.print(f"[bold red]Error:[/] {message}")
     raise click.Abort()
+
+
+@main.command(name="codec-encode")
+@click.option("-i", "--in", "input_path", type=str, required=True, help="Input bits file.")
+@click.option(
+    "-o",
+    "--out",
+    "output_path",
+    type=str,
+    required=True,
+    help="Output path for the generated tokens JSON.",
+)
+@click.option("--seed-text", type=str, default="", help="Seed text used to initialise the codec context.")
+def codec_encode(input_path: str, output_path: str, seed_text: str) -> None:
+    """Encode a raw bitstream into placeholder token identifiers using MockLM."""
+
+    try:
+        payload = _read_bytes(input_path)
+        tokens = encode_text(payload, MockLM(), quality={}, seed_text=seed_text)
+        _write_tokens(output_path, tokens)
+    except RuntimeError as exc:
+        _handle_cli_error(str(exc))
+
+
+@main.command(name="codec-decode")
+@click.option(
+    "-i",
+    "--in",
+    "input_path",
+    type=str,
+    required=True,
+    help="Tokens JSON path produced by codec-encode.",
+)
+@click.option(
+    "-o",
+    "--out",
+    "output_path",
+    type=str,
+    required=True,
+    help="Output path for the recovered bitstream.",
+)
+@click.option("--seed-text", type=str, default="", help="Seed text used during encoding.")
+def codec_decode(input_path: str, output_path: str, seed_text: str) -> None:
+    """Decode placeholder token identifiers back into the embedded bitstream."""
+
+    try:
+        tokens = _read_tokens(input_path)
+        payload = decode_text(tokens, MockLM(), quality={}, seed_text=seed_text)
+        _write_bytes(output_path, payload)
+    except (RuntimeError, ValueError) as exc:
+        _handle_cli_error(str(exc))
 
 
 @main.command()
