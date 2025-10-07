@@ -2,12 +2,19 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PYTHONPATH="$ROOT_DIR/src:${PYTHONPATH:-}"
+VENV_PATH="$ROOT_DIR/.venv"
 
-python -m neuralstego --help >/dev/null
-python -m neuralstego doctor
-python -m neuralstego encode --context "$ROOT_DIR/README.md" --message "ping" --mode arithmetic --model gpt2-fa --output "$ROOT_DIR/tmp_stego.txt"
-python -m neuralstego decode --stego "$ROOT_DIR/tmp_stego.txt" --context "$ROOT_DIR/README.md" --mode arithmetic --model gpt2-fa || true
-rm -f "$ROOT_DIR/tmp_stego.txt"
+if [[ -f "$VENV_PATH/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$VENV_PATH/bin/activate"
+else
+  echo "[smoke_test_cli] هشدار: محیط مجازی .venv پیدا نشد؛ از Python سیستم استفاده می‌شود." >&2
+fi
 
-echo "[smoke_test_cli] تمام دستورات CLI با موفقیت اجرا شدند (decode هنوز placeholder است)."
+cd "$ROOT_DIR"
+
+neuralstego --version
+neuralstego doctor
+pytest -q
+
+echo "[smoke_test_cli] تمام دستورات موردنیاز با موفقیت اجرا شدند."

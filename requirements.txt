@@ -12,5 +12,3 @@ pytest>=7.0
 pytest-cov
 mypy
 ruff
-# Optional GPU extra
-# torch
