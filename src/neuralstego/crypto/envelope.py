@@ -55,4 +55,13 @@ def seal_envelope(components: EnvelopeComponents) -> Envelope:
 def open_envelope(envelope: Envelope) -> EnvelopeComponents:
     """Invert :func:`seal_envelope` by recreating the component bundle."""
 
-    raise NotImplementedError("Envelope opening logic has not been implemented yet.")
+    if not envelope.salt:
+        raise EnvelopeError("Envelope salt must be non-empty.")
+    if not envelope.nonce or not envelope.tag:
+        raise EnvelopeError("Envelope data is missing nonce or authentication tag.")
+    ciphertext = AEADCiphertext(
+        nonce=envelope.nonce,
+        ciphertext=envelope.ciphertext,
+        tag=envelope.tag,
+    )
+    return EnvelopeComponents(salt=envelope.salt, ciphertext=ciphertext)

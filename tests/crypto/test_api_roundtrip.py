@@ -1,15 +1,21 @@
-"""Placeholder tests for the high-level crypto API."""
+"""Integration tests for the high-level crypto API."""
 
 from __future__ import annotations
-
-import pytest
 
 from neuralstego.crypto import api
 
 
-@pytest.mark.xfail(reason="High-level API pending", strict=False)
 def test_api_encrypt_decrypt_roundtrip() -> None:
-    """The API should eventually support encryption round-trips."""
+    """The high-level API supports round-tripping payloads."""
 
-    envelope = api.encrypt_message(b"password", b"payload")
-    assert api.decrypt_message(b"password", envelope) == b"payload"
+    associated_data = b"metadata"
+    envelope = api.encrypt_message(
+        b"password",
+        b"payload",
+        associated_data=associated_data,
+    )
+    assert api.decrypt_message(
+        b"password",
+        envelope,
+        associated_data=associated_data,
+    ) == b"payload"

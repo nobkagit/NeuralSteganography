@@ -1,4 +1,4 @@
-"""Placeholder tests for the envelope orchestration layer."""
+"""Tests for the envelope orchestration layer."""
 
 from __future__ import annotations
 
@@ -7,13 +7,21 @@ import pytest
 from neuralstego.crypto import aead, envelope
 
 
-@pytest.mark.xfail(reason="Envelope opening pending", strict=False)
 def test_open_envelope_roundtrip() -> None:
-    """Envelopes should support round-tripping once implemented."""
+    """Sealing and opening an envelope should be lossless."""
 
-    ciphertext = envelope.EnvelopeComponents(
-        salt=b"saltsalt",
-        ciphertext=aead.AEADCiphertext(nonce=b"\x00" * 12, ciphertext=b"", tag=b"\x00" * 16),
-    )
-    sealed = envelope.seal_envelope(ciphertext)
-    assert envelope.open_envelope(sealed) == ciphertext
+    key = aead.generate_key()
+    salt = b"\x01" * envelope.DEFAULT_SALT_SIZE
+    encrypted = aead.encrypt(key, b"payload")
+    components = envelope.EnvelopeComponents(salt=salt, ciphertext=encrypted)
+    sealed = envelope.seal_envelope(components)
+
+    assert envelope.open_envelope(sealed) == components
+
+
+def test_open_envelope_rejects_missing_components() -> None:
+    """Opening an envelope with missing parts raises :class:`EnvelopeError`."""
+
+    bad_envelope = envelope.Envelope(salt=b"", nonce=b"", ciphertext=b"", tag=b"")
+    with pytest.raises(envelope.EnvelopeError):
+        envelope.open_envelope(bad_envelope)
