@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+from .api import decode_text, encode_text
+
 if TYPE_CHECKING:  # pragma: no cover - import-time hinting only
     from .cli import main as _cli_main
 
@@ -16,4 +18,4 @@ def main(*args: Any, **kwargs: Any) -> Any:
     return _cli_main(*args, **kwargs)
 
 
-__all__ = ["main"]
+__all__ = ["main", "encode_text", "decode_text"]
