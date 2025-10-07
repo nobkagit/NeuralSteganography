@@ -10,12 +10,12 @@ def test_api_encrypt_decrypt_roundtrip() -> None:
 
     associated_data = b"metadata"
     envelope = api.encrypt_message(
-        b"password",
+        "password",
         b"payload",
         associated_data=associated_data,
     )
     assert api.decrypt_message(
-        b"password",
+        "password",
         envelope,
         associated_data=associated_data,
     ) == b"payload"
