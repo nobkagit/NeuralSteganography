@@ -45,7 +45,9 @@ nvidia-nvtx-cu12==12.6.77
 packaging==25.0
 PyYAML==6.0.2
 regex==2024.11.6
+reedsolo==1.7.0
 requests==2.32.4
+rich==13.9.2
 safetensors==0.5.3
 sympy==1.14.0
 tokenizers==0.21.1

@@ -1,18 +1,13 @@
-"""Codec module providing arithmetic steganography interfaces."""
+"""Codec utilities for neural steganography."""
 
-from .api import decode_arithmetic, encode_arithmetic
-from .distribution import CachedLM, MockLM
-from .errors import ArithmeticRangeError, DecodeDivergenceError, QualityConfigError
-from .types import LMProvider, ProbDist
+from .chunker import assemble_bytes, chunk_bytes, make_msg_id
+from .packet import Packet, build_packet, parse_packet
 
 __all__ = [
-    "ArithmeticRangeError",
-    "DecodeDivergenceError",
-    "QualityConfigError",
-    "LMProvider",
-    "ProbDist",
-    "CachedLM",
-    "MockLM",
-    "encode_arithmetic",
-    "decode_arithmetic",
+    "Packet",
+    "assemble_bytes",
+    "build_packet",
+    "chunk_bytes",
+    "make_msg_id",
+    "parse_packet",
 ]
