@@ -1,566 +1,450 @@
-"""Command-line interface for neuralstego."""
+"""Command line interface for NeuralSteganography."""
 
 from __future__ import annotations
 
-import importlib
+import argparse
 import json
-import platform
-import sys
-from getpass import getpass
 from pathlib import Path
-from typing import Any
+import sys
+from typing import Iterable, Mapping, MutableMapping, Sequence
 
-import click
-from rich.console import Console
-from rich.table import Table
-
-from .api import decode_text, encode_text
+from .api import decode_text as codec_decode_text, encode_text as codec_encode_text
 from .codec.distribution import MockLM
-from .crypto import DecryptionError, EncryptionError
 from .crypto.api import decrypt_message, encrypt_message
-from .crypto.envelope import unpack_envelope
-from .crypto.errors import EnvelopeError
-from .utils import configure_logging
+from .crypto.envelope import EnvelopeError, unpack_envelope
+from .crypto.errors import DecryptionError, EncryptionError
+from .crypto.gpt2fa import decode_text as gpt2fa_decode_text, encode_text as gpt2fa_encode_text
 
-console = Console()
-
-
-def _rich_echo(message: str, **style_kwargs: Any) -> None:
-    """Print a message using Rich's console."""
-
-    console.print(message, **style_kwargs)
+# Backwards compatibility for tests monkeypatching these helpers.
+encode_text = gpt2fa_encode_text
+decode_text = gpt2fa_decode_text
 
 
-@click.group(
-    context_settings={"help_option_names": ["-h", "--help"]},
-)
-@click.version_option(version="0.1.0", prog_name="neuralstego")
-@click.option(
-    "--log-level",
-    type=click.Choice(["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"], case_sensitive=False),
-    default=None,
-    help="Set the log level for the CLI session.",
-)
-def main(log_level: str | None) -> None:
-    """Entry point for the neuralstego command-line interface."""
-
-    configure_logging(log_level)
+class CLIError(RuntimeError):
+    """Domain specific exception raised for CLI errors."""
 
 
-def _read_bytes(path: str) -> bytes:
-    if path == "-":
-        try:
-            return sys.stdin.buffer.read()
-        except OSError as exc:  # pragma: no cover - defensive
-            raise RuntimeError(f"Failed to read from stdin: {exc}") from exc
-    try:
-        return Path(path).read_bytes()
-    except OSError as exc:
-        raise RuntimeError(f"Failed to read input file: {exc}") from exc
-
-
-def _write_bytes(path: str, data: bytes) -> None:
-    if path == "-":
-        if sys.stdout.isatty():
-            console.print("[bold yellow]Warning:[/] writing binary data to the terminal.")
-        try:
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-        except OSError as exc:  # pragma: no cover - defensive
-            raise RuntimeError(f"Failed to write to stdout: {exc}") from exc
-        return
-    try:
-        output_path = Path(path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(data)
-    except OSError as exc:
-        raise RuntimeError(f"Failed to write output file: {exc}") from exc
-
-
-def _read_tokens(path: str) -> list[int]:
-    try:
-        if path == "-":
-            raw = sys.stdin.read()
-        else:
-            raw = Path(path).read_text(encoding="utf-8")
-        data = json.loads(raw or "[]")
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Failed to read tokens payload: {exc}") from exc
-    if not isinstance(data, list) or not all(isinstance(item, int) for item in data):
-        raise RuntimeError("Token payload must be a JSON array of integers")
-    return list(data)
-
-
-def _write_tokens(path: str, tokens: list[int]) -> None:
-    serialized = json.dumps(tokens)
-    try:
-        if path == "-":
-            sys.stdout.write(serialized + "\n")
-            sys.stdout.flush()
-        else:
-            output_path = Path(path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(serialized + "\n", encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"Failed to write tokens payload: {exc}") from exc
-
-
-def _resolve_password(password: str | None) -> str:
-    return password if password is not None else getpass("Password: ")
-
-
-def _handle_cli_error(message: str) -> None:
-    console.print(f"[bold red]Error:[/] {message}")
-    raise click.Abort()
-
-
-def _coerce_quality_value(raw_value: str) -> Any:
-    """Convert CLI string values into Python types."""
-
-    lowered = raw_value.lower()
+def _convert_scalar(value: str) -> object:
+    lowered = value.lower()
     if lowered in {"true", "false"}:
         return lowered == "true"
-
     try:
-        return int(raw_value)
+        return int(value)
     except ValueError:
         pass
-
     try:
-        return float(raw_value)
+        return float(value)
     except ValueError:
-        return raw_value
+        return value
 
 
-def _collect_quality_overrides(ctx: click.Context) -> dict[str, Any]:
-    """Extract ``--quality.*`` overrides forwarded to codec commands."""
-
-    extra_args = list(ctx.args)
-    quality: dict[str, Any] = {}
-    remaining: list[str] = []
-    index = 0
-
-    while index < len(extra_args):
-        token = extra_args[index]
-        if token.startswith("--quality."):
-            suffix = token[len("--quality.") :]
-            if not suffix:
-                raise click.BadOptionUsage(
-                    "quality", "Quality option requires a key after '--quality.'."
-                )
-
-            if "=" in suffix:
-                key, raw = suffix.split("=", 1)
-                if raw == "":
-                    raise click.BadOptionUsage(
-                        key, f"Quality option '{key}' requires a value."
-                    )
-            else:
-                key = suffix
-                index += 1
-                if index >= len(extra_args):
-                    raise click.BadOptionUsage(
-                        key, f"Quality option '{key}' requires a value."
-                    )
-                raw = extra_args[index]
-
-            quality[key] = _coerce_quality_value(raw)
-        else:
-            remaining.append(token)
-        index += 1
-
-    if remaining:
-        raise click.UsageError(
-            "Unexpected extra arguments: " + " ".join(remaining)
-        )
-
-    ctx.args = []
+def _parse_quality(pairs: Iterable[Sequence[str]] | None) -> Mapping[str, object]:
+    quality: MutableMapping[str, object] = {}
+    if not pairs:
+        return quality
+    for pair in pairs:
+        if len(pair) != 2:
+            raise CLIError("Each --quality requires a NAME and VALUE pair.")
+        name, raw_value = pair
+        if not name:
+            raise CLIError("Quality name must not be empty.")
+        if name in quality:
+            raise CLIError(f"Quality parameter '{name}' specified multiple times.")
+        quality[name] = _convert_scalar(raw_value)
     return quality
 
 
-@main.command(
-    name="codec-encode",
-    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
-)
-@click.option("-i", "--in", "input_path", type=str, required=True, help="Input bits file.")
-@click.option(
-    "-o",
-    "--out",
-    "output_path",
-    type=str,
-    required=True,
-    help="Output path for the generated tokens JSON.",
-)
-@click.option("--seed-text", type=str, default="", help="Seed text used to initialise the codec context.")
-@click.pass_context
-def codec_encode(
-    ctx: click.Context, input_path: str, output_path: str, seed_text: str
-) -> None:
-    """Encode a raw bitstream into placeholder token identifiers using MockLM."""
+def _normalise_quality_flags(arguments: Sequence[str]) -> list[str]:
+    """Expand ``--quality.NAME value`` flags into ``--quality NAME value`` pairs."""
 
-    quality = _collect_quality_overrides(ctx)
-    try:
-        payload = _read_bytes(input_path)
-        tokens = encode_text(
-            payload,
-            MockLM(),
-            quality=quality,
-            seed_text=seed_text,
-        )
-        _write_tokens(output_path, tokens)
-    except RuntimeError as exc:
-        _handle_cli_error(str(exc))
+    normalised: list[str] = []
+    for token in arguments:
+        if token.startswith("--quality."):
+            option, eq, value = token.partition("=")
+            key = option[len("--quality.") :]
+            normalised.append("--quality")
+            normalised.append(key)
+            if eq:
+                normalised.append(value)
+        else:
+            normalised.append(token)
+    return normalised
 
 
-@main.command(
-    name="codec-decode",
-    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
-)
-@click.option(
-    "-i",
-    "--in",
-    "input_path",
-    type=str,
-    required=True,
-    help="Tokens JSON path produced by codec-encode.",
-)
-@click.option(
-    "-o",
-    "--out",
-    "output_path",
-    type=str,
-    required=True,
-    help="Output path for the recovered bitstream.",
-)
-@click.option("--seed-text", type=str, default="", help="Seed text used during encoding.")
-@click.pass_context
-def codec_decode(
-    ctx: click.Context, input_path: str, output_path: str, seed_text: str
-) -> None:
-    """Decode placeholder token identifiers back into the embedded bitstream."""
-
-    quality = _collect_quality_overrides(ctx)
-    try:
-        tokens = _read_tokens(input_path)
-        payload = decode_text(
-            tokens,
-            MockLM(),
-            quality=quality,
-            seed_text=seed_text,
-        )
-        _write_bytes(output_path, payload)
-    except (RuntimeError, ValueError) as exc:
-        _handle_cli_error(str(exc))
-
-
-@main.command()
-@click.option(
-    "--context",
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    required=True,
-    help="Path to the context text file that seeds language generation.",
-)
-@click.option(
-    "--message",
-    type=str,
-    required=True,
-    help="Plaintext message to conceal using GPT-based steganography.",
-)
-@click.option(
-    "--mode",
-    type=click.Choice(["arithmetic", "huffman", "bins", "sample"], case_sensitive=False),
-    default="arithmetic",
-    show_default=True,
-    help="Embedding backend to simulate (aligned with the reference scripts).",
-)
-@click.option(
-    "--model",
-    type=str,
-    default="gpt2-fa",
-    show_default=True,
-    help="Language model identifier to load (e.g. gpt2-fa).",
-)
-@click.option(
-    "--output",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Optional path to write the generated stego text; prints to stdout otherwise.",
-)
-def encode(
-    context: Path,
-    message: str,
-    mode: str,
-    model: str,
-    output: Path | None,
-) -> None:
-    """Encode a plaintext message into fluent text (placeholder)."""
-
-    try:
-        context_preview = context.read_text(encoding="utf-8")
-    except OSError as exc:  # pragma: no cover - simple I/O guard
-        raise click.ClickException(f"Failed to read context file: {exc}") from exc
-
-    if not context_preview.strip():
-        raise click.ClickException("Context file is empty; provide seed text to guide generation.")
-
-    summary = Table(title="encode parameters", header_style="bold magenta")
-    summary.add_column("Parameter", style="cyan", justify="right")
-    summary.add_column("Value", style="white")
-    summary.add_row("Context", str(context))
-    summary.add_row("Message", message)
-    summary.add_row("Mode", mode.lower())
-    summary.add_row("Model", model)
-    summary.add_row("Output", str(output) if output else "stdout")
-
-    _rich_echo("[bold green]Encoding message into carrier text[/bold green]")
-    console.print(summary)
-
-    preview_excerpt = context_preview.strip().splitlines()[0][:120]
-    _rich_echo(f"\nContext preview: [italic]{preview_excerpt}...[/italic]")
-
-    _rich_echo(
-        "\n[italic]Actual language-model driven embedding will be integrated in later phases.[/italic]"
-    )
-
-    if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("<placeholder stego text>", encoding="utf-8")
-        _rich_echo(f"\n[bold green]Placeholder stego text written to[/bold green] {output}")
+def _read_text(path: str | Path) -> str:
+    data: bytes
+    if str(path) == "-":
+        data = sys.stdin.buffer.read()
     else:
-        _rich_echo("\n<placeholder stego text>")
-
-
-@main.command()
-@click.option(
-    "--stego",
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    required=True,
-    help="Path to the stego text produced during encoding.",
-)
-@click.option(
-    "--context",
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    required=True,
-    help="The same context file used during encoding.",
-)
-@click.option(
-    "--mode",
-    type=click.Choice(["arithmetic", "huffman", "bins"], case_sensitive=False),
-    default="arithmetic",
-    show_default=True,
-    help="Embedding backend expected when decoding stego text.",
-)
-@click.option(
-    "--model",
-    type=str,
-    default="gpt2-fa",
-    show_default=True,
-    help="Language model identifier to load for decoding.",
-)
-def decode(stego: Path, context: Path, mode: str, model: str) -> None:
-    """Decode a hidden message from generated stego text (placeholder)."""
-
+        try:
+            data = Path(path).read_bytes()
+        except FileNotFoundError as exc:
+            raise CLIError(f"Input file '{path}' was not found.") from exc
     try:
-        stego_text = stego.read_text(encoding="utf-8")
-        context_text = context.read_text(encoding="utf-8")
-    except OSError as exc:  # pragma: no cover - simple I/O guard
-        raise click.ClickException(f"Failed to read text file: {exc}") from exc
-
-    table = Table(title="decode parameters", header_style="bold magenta")
-    table.add_column("Parameter", style="cyan", justify="right")
-    table.add_column("Value", style="white")
-    table.add_row("Stego", str(stego))
-    table.add_row("Context", str(context))
-    table.add_row("Mode", mode.lower())
-    table.add_row("Model", model)
-
-    _rich_echo("[bold blue]Decoding hidden message from stego text[/bold blue]")
-    console.print(table)
-
-    context_excerpt = context_text.strip().splitlines()[0][:120] if context_text.strip() else "(empty)"
-    stego_excerpt = stego_text.strip().splitlines()[0][:120] if stego_text.strip() else "(empty)"
-
-    _rich_echo(f"\nContext preview: [italic]{context_excerpt}...[/italic]")
-    _rich_echo(f"Stego preview: [italic]{stego_excerpt}...[/italic]")
-
-    _rich_echo(
-        "\n[italic]Decoding logic using GPT-based arithmetic coding will arrive in subsequent iterations.[/italic]"
-    )
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CLIError("Input data is not valid UTF-8 text.") from exc
 
 
-@main.command()
-@click.option(
-    "-i",
-    "--in",
-    "input_path",
-    type=str,
-    required=True,
-    help="Input path or '-' for stdin.",
-)
-@click.option(
-    "-o",
-    "--out",
-    "output_path",
-    type=str,
-    default="-",
-    show_default=True,
-    help="Output path or '-' for stdout.",
-)
-@click.option(
-    "-p",
-    "--password",
-    type=str,
-    default=None,
-    help="Password to use; prompts securely if omitted.",
-)
-@click.option(
-    "--kdf",
-    type=click.Choice(["argon2id", "pbkdf2"], case_sensitive=False),
-    default="argon2id",
-    show_default=True,
-    help="Key-derivation function to use.",
-)
-@click.option(
-    "--aad",
-    type=str,
-    default=None,
-    help="Optional additional authenticated data (UTF-8 string).",
-)
-def encrypt(
-    input_path: str,
-    output_path: str,
-    password: str | None,
-    kdf: str,
-    aad: str | None,
-) -> None:
-    """Encrypt a message into a JSON envelope."""
-
-    password_value = _resolve_password(password)
-    aad_bytes = aad.encode("utf-8") if aad is not None else b""
-
+def _read_bytes(path: str | Path) -> bytes:
+    if str(path) == "-":
+        return sys.stdin.buffer.read()
     try:
-        payload = _read_bytes(input_path)
-        blob = encrypt_message(payload, password_value, aad=aad_bytes, kdf_method=kdf)
-        _write_bytes(output_path, blob)
-    except (EncryptionError, RuntimeError) as exc:
-        _handle_cli_error(str(exc))
+        return Path(path).read_bytes()
+    except FileNotFoundError as exc:
+        raise CLIError(f"Input file '{path}' was not found.") from exc
+    except OSError as exc:
+        raise CLIError(f"Failed to read input '{path}': {exc}.") from exc
 
 
-@main.command()
-@click.option(
-    "-i",
-    "--in",
-    "input_path",
-    type=str,
-    required=True,
-    help="Envelope path or '-' for stdin.",
-)
-@click.option(
-    "-o",
-    "--out",
-    "output_path",
-    type=str,
-    default="-",
-    show_default=True,
-    help="Output path or '-' for stdout.",
-)
-@click.option(
-    "-p",
-    "--password",
-    type=str,
-    default=None,
-    help="Password to use; prompts securely if omitted.",
-)
-@click.option(
-    "--kdf",
-    type=str,
-    default=None,
-    help="Optional KDF name expectation for validation.",
-)
-@click.option(
-    "--aad",
-    type=str,
-    default=None,
-    help="Optional expected AAD string for validation.",
-)
-def decrypt(
-    input_path: str,
-    output_path: str,
-    password: str | None,
-    kdf: str | None,
-    aad: str | None,
-) -> None:
-    """Decrypt a JSON envelope back into plaintext."""
+def _write_text(path: str | Path, message: str) -> None:
+    encoded = message.encode("utf-8")
+    if str(path) == "-":
+        sys.stdout.buffer.write(encoded)
+        if not message.endswith("\n"):
+            sys.stdout.buffer.write(b"\n")
+        sys.stdout.flush()
+        return
+    Path(path).write_bytes(encoded)
 
-    password_value = _resolve_password(password)
 
+def _write_bytes(path: str | Path, data: bytes) -> None:
+    if str(path) == "-":
+        sys.stdout.buffer.write(data)
+        sys.stdout.flush()
+        return
+    Path(path).write_bytes(data)
+
+
+def _load_tokens(path: str | Path) -> MutableMapping[str, object]:
     try:
-        blob = _read_bytes(input_path)
-        if aad is not None or kdf is not None:
-            try:
-                _, _, _, meta, aad_bytes, _ = unpack_envelope(blob)
-            except EnvelopeError as exc:
-                raise DecryptionError(str(exc)) from exc
-            if kdf is not None and meta.get("name") != kdf:
-                raise DecryptionError("Envelope KDF does not match the expected value.")
-            if aad is not None:
-                expected = aad.encode("utf-8")
-                actual = aad_bytes or b""
-                if actual != expected:
-                    raise DecryptionError("Envelope AAD does not match the expected value.")
-        plaintext = decrypt_message(blob, password_value)
-        _write_bytes(output_path, plaintext)
-    except (DecryptionError, RuntimeError) as exc:
-        _handle_cli_error(str(exc))
+        raw = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise CLIError(f"Tokens file '{path}' was not found.") from exc
+    except OSError as exc:
+        raise CLIError(f"Failed to read tokens file '{path}': {exc}.") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CLIError(f"Tokens file '{path}' is not valid JSON: {exc}.") from exc
+    if not isinstance(data, MutableMapping):
+        raise CLIError("Tokens file must contain a JSON object.")
+    return data
 
 
-@main.command()
-def doctor() -> None:
-    """Check the execution environment for common dependencies."""
+def _dump_tokens(path: str | Path, payload: Mapping[str, object]) -> None:
+    formatted = json.dumps(payload, ensure_ascii=False, indent=2)
+    Path(path).write_text(formatted + "\n", encoding="utf-8")
 
-    python_version = platform.python_version()
-    checks = {
-        "Python": (True, f"Version {python_version}"),
-        "torch": _import_with_version_hint("torch", "pip install torch"),
-        "transformers": _import_with_version_hint(
-            "transformers", "pip install transformers"
-        ),
-        "bitarray": _import_with_version_hint("bitarray", "pip install bitarray"),
+
+def _handle_encode(args: argparse.Namespace) -> int:
+    quality = _parse_quality(args.quality)
+    message = _read_text(args.input)
+    try:
+        payload = encode_text(message, args.password, quality=quality)
+    except Exception as exc:  # pragma: no cover - defensive barrier
+        raise CLIError(f"Failed to encode message: {exc}") from exc
+    _dump_tokens(args.output, payload)
+    return 0
+
+
+def _handle_decode(args: argparse.Namespace) -> int:
+    payload = _load_tokens(args.input)
+    try:
+        message = decode_text(payload, args.password)
+    except Exception as exc:  # pragma: no cover - defensive barrier
+        raise CLIError(f"Failed to decode tokens: {exc}") from exc
+    _write_text(args.output, message)
+    return 0
+
+
+def _handle_codec_encode(args: argparse.Namespace) -> int:
+    quality = _parse_quality(args.quality)
+    message_bits = _read_bytes(args.input)
+    lm = MockLM()
+    try:
+        tokens = codec_encode_text(message_bits, lm, quality=dict(quality), seed_text=args.seed)
+    except Exception as exc:  # pragma: no cover - defensive barrier
+        raise CLIError(f"Failed to encode payload: {exc}") from exc
+
+    payload: dict[str, object] = {
+        "tokens": list(tokens),
+        "quality": dict(quality),
     }
+    if args.seed:
+        payload["seed_text"] = args.seed
+    _dump_tokens(args.output, payload)
+    return 0
 
-    table = Table(title="neuralstego doctor", header_style="bold magenta")
-    table.add_column("Component", style="cyan", justify="right")
-    table.add_column("Status", style="green")
-    table.add_column("Details", style="white")
 
-    missing_dependencies = []
-    for component, (ok, details) in checks.items():
-        status = "[green]OK[/]" if ok else "[red]Missing[/]"
-        table.add_row(component, status, details)
-        if not ok:
-            missing_dependencies.append((component, details))
+def _handle_codec_decode(args: argparse.Namespace) -> int:
+    payload = _load_tokens(args.input)
+    raw_tokens = payload.get("tokens")
+    if not isinstance(raw_tokens, Sequence):
+        raise CLIError("Token payload must contain a 'tokens' sequence.")
 
-    console.print(table)
-
-    if missing_dependencies:
-        _rich_echo("\n[bold yellow]Next steps:[/bold yellow]")
-        for component, details in missing_dependencies:
-            _rich_echo(f" • Install [bold]{component}[/bold]: {details}")
+    if args.seed:
+        seed_text = args.seed
     else:
-        _rich_echo("\n[bold green]All required dependencies are available![/bold green]")
+        seed_field = payload.get("seed_text", "")
+        if not isinstance(seed_field, str):
+            raise CLIError("Seed text in payload must be a string if present.")
+        seed_text = seed_field
 
+    if args.quality:
+        quality = dict(_parse_quality(args.quality))
+    else:
+        stored_quality = payload.get("quality", {})
+        if stored_quality is None:
+            quality = {}
+        elif isinstance(stored_quality, Mapping):
+            quality = dict(stored_quality)
+        else:
+            raise CLIError("Quality metadata in payload must be a mapping.")
 
-def _import_with_version_hint(module_name: str, install_hint: str) -> tuple[bool, str]:
-    """Try to import a module and return success status with details."""
-
+    tokens = [int(token) for token in raw_tokens]
+    lm = MockLM()
     try:
-        module = importlib.import_module(module_name)
-    except ImportError:
-        return False, install_hint
+        message = codec_decode_text(tokens, lm, quality=quality, seed_text=seed_text)
+    except Exception as exc:  # pragma: no cover - defensive barrier
+        raise CLIError(f"Failed to decode payload: {exc}") from exc
+    _write_bytes(args.output, message)
+    return 0
 
-    version = getattr(module, "__version__", "unknown version")
-    return True, f"Version {version}"
+
+def _handle_encrypt(args: argparse.Namespace) -> int:
+    plaintext = _read_bytes(args.input)
+    aad = args.aad.encode("utf-8") if args.aad else b""
+    try:
+        envelope = encrypt_message(plaintext, args.password, aad=aad)
+    except EncryptionError as exc:
+        raise CLIError(f"Encryption failed: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - defensive barrier
+        raise CLIError("Encryption failed due to an unexpected error.") from exc
+    _write_bytes(args.output, envelope)
+    return 0
 
 
-if __name__ == "__main__":
-    main()
+def _handle_decrypt(args: argparse.Namespace) -> int:
+    blob = _read_bytes(args.input)
+    if args.aad is not None:
+        expected_aad = args.aad.encode("utf-8")
+        try:
+            _, _, _, _, stored_aad, _ = unpack_envelope(blob)
+        except EnvelopeError as exc:
+            raise CLIError(f"Failed to inspect envelope: {exc}") from exc
+        actual_aad = stored_aad or b""
+        if actual_aad != expected_aad:
+            raise CLIError("Provided AAD does not match the envelope metadata.")
+    try:
+        plaintext = decrypt_message(blob, args.password)
+    except DecryptionError as exc:
+        raise CLIError(f"Decryption failed: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - defensive barrier
+        raise CLIError("Decryption failed due to an unexpected error.") from exc
+    _write_bytes(args.output, plaintext)
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="neuralstego",
+        description="Command line utilities for NeuralSteganography.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    encode_parser = subparsers.add_parser(
+        "encode",
+        help="Encode a plaintext message into GPT2-fa tokens.",
+    )
+    encode_parser.add_argument(
+        "-p",
+        "--password",
+        required=True,
+        help="Password used to seed the encoder/decoder.",
+    )
+    encode_parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Path to a UTF-8 text file containing the message (use '-' for stdin).",
+    )
+    encode_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Where to write the resulting JSON tokens.",
+    )
+    encode_parser.add_argument(
+        "--quality",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "VALUE"),
+        default=[],
+        help="Quality parameters forwarded to the GPT2-fa encoder (repeatable).",
+    )
+    encode_parser.set_defaults(handler=_handle_encode)
+
+    decode_parser = subparsers.add_parser(
+        "decode",
+        help="Decode GPT2-fa tokens back into the original message.",
+    )
+    decode_parser.add_argument(
+        "-p",
+        "--password",
+        required=True,
+        help="Password that was used during encoding.",
+    )
+    decode_parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Path to the JSON tokens file produced by the encoder.",
+    )
+    decode_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Where to write the recovered UTF-8 message (use '-' for stdout).",
+    )
+    decode_parser.set_defaults(handler=_handle_decode)
+
+    codec_encode_parser = subparsers.add_parser(
+        "codec-encode",
+        help="Encode raw bytes using the arithmetic codec mock.",
+    )
+    codec_encode_parser.add_argument(
+        "--in",
+        dest="input",
+        required=True,
+        help="Path to the binary payload to embed (use '-' for stdin).",
+    )
+    codec_encode_parser.add_argument(
+        "--out",
+        dest="output",
+        required=True,
+        help="Where to write the resulting token JSON (use '-' for stdout).",
+    )
+    codec_encode_parser.add_argument(
+        "--seed",
+        default="",
+        help="Optional seed text used to warm up the language model.",
+    )
+    codec_encode_parser.add_argument(
+        "--quality",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "VALUE"),
+        default=[],
+        help="Quality hints forwarded to the arithmetic codec (repeatable).",
+    )
+    codec_encode_parser.set_defaults(handler=_handle_codec_encode)
+
+    codec_decode_parser = subparsers.add_parser(
+        "codec-decode",
+        help="Decode tokens produced by codec-encode back into the original bytes.",
+    )
+    codec_decode_parser.add_argument(
+        "--in",
+        dest="input",
+        required=True,
+        help="Path to the JSON tokens file (use '-' for stdin).",
+    )
+    codec_decode_parser.add_argument(
+        "--out",
+        dest="output",
+        required=True,
+        help="Where to write the recovered payload (use '-' for stdout).",
+    )
+    codec_decode_parser.add_argument(
+        "--seed",
+        default="",
+        help="Seed text to use during decoding (overrides payload metadata if supplied).",
+    )
+    codec_decode_parser.add_argument(
+        "--quality",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "VALUE"),
+        default=[],
+        help="Quality overrides for decoding (repeatable).",
+    )
+    codec_decode_parser.set_defaults(handler=_handle_codec_decode)
+
+    encrypt_parser = subparsers.add_parser(
+        "encrypt",
+        help="Encrypt a message into a password-protected envelope.",
+    )
+    encrypt_parser.add_argument(
+        "-p",
+        "--password",
+        required=True,
+        help="Password used to derive the encryption key.",
+    )
+    encrypt_parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Path to the plaintext input (use '-' for stdin).",
+    )
+    encrypt_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Where to write the encrypted envelope (use '-' for stdout).",
+    )
+    encrypt_parser.add_argument(
+        "--aad",
+        help="Additional authenticated data (treated as UTF-8).",
+    )
+    encrypt_parser.set_defaults(handler=_handle_encrypt)
+
+    decrypt_parser = subparsers.add_parser(
+        "decrypt",
+        help="Decrypt an envelope produced by the encrypt command.",
+    )
+    decrypt_parser.add_argument(
+        "-p",
+        "--password",
+        required=True,
+        help="Password that was used during encryption.",
+    )
+    decrypt_parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Path to the encrypted envelope (use '-' for stdin).",
+    )
+    decrypt_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Where to write the recovered plaintext (use '-' for stdout).",
+    )
+    decrypt_parser.add_argument(
+        "--aad",
+        help="Expected additional authenticated data for validation (UTF-8).",
+    )
+    decrypt_parser.set_defaults(handler=_handle_decrypt)
+
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    raw_args = list(argv) if argv is not None else sys.argv[1:]
+    normalised_args = _normalise_quality_flags(raw_args)
+    parser = _build_parser()
+    args = parser.parse_args(normalised_args)
+    handler = getattr(args, "handler", None)
+    if handler is None:
+        parser.print_help()
+        return 1
+    try:
+        return handler(args)
+    except CLIError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    raise SystemExit(main())
