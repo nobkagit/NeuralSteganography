@@ -5,6 +5,7 @@ from typing import Optional
 
 from .arithmetic import ArithmeticLM
 from .mock import MockLM
+from .transformers_adapter import TransformersLM
 from ..exceptions import ConfigurationError
 
 
@@ -20,4 +21,4 @@ def load_lm(name: str, *, device: Optional[str] = None):
     raise ConfigurationError(f"unknown language model provider: {name}")
 
 
-__all__ = ["ArithmeticLM", "MockLM", "load_lm"]
+__all__ = ["ArithmeticLM", "MockLM", "TransformersLM", "load_lm"]

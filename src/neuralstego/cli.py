@@ -19,8 +19,12 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when rich is unavaila
             text = " ".join(str(obj) for obj in objects)
             print(text)
 
-from .api import decode_text as codec_decode_text
-from .api import encode_text as codec_encode_text
+from .api import (
+    cover_generate as api_cover_generate,
+    cover_reveal as api_cover_reveal,
+    decode_text as codec_decode_text,
+    encode_text as codec_encode_text,
+)
 from .codec.distribution import MockLM
 from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
 from .crypto.errors import DecryptionError, EncryptionError
@@ -436,6 +440,133 @@ def _handle_decode(argv: Sequence[str]) -> int:
     return 0
 
 
+def _handle_cover_generate(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="neuralstego cover-generate",
+        description="Generate a Farsi cover text embedding secret data.",
+    )
+    parser.add_argument("-p", "--password", help="Optional password for encryption (not yet supported)")
+    parser.add_argument("-i", "--in", dest="input_path", default="-", help="Secret input file (default: stdin)")
+    parser.add_argument("-o", "--out", dest="output_path", default="-", help="Cover text output (default: stdout)")
+    parser.add_argument("--seed", dest="seed_text", default="", help="Seed text to prime the language model")
+    parser.add_argument(
+        "--quality",
+        action="append",
+        nargs=2,
+        metavar=("KEY", "VALUE"),
+        help="Quality parameter override as key/value pairs",
+    )
+    parser.add_argument("--chunk-bytes", type=int, default=256, help="Bytes per chunk for framing")
+    parser.add_argument("--crc", choices=["on", "off"], default="on", help="Enable or disable CRC32")
+    parser.add_argument(
+        "--ecc",
+        choices=["auto", "none", "rs"],
+        default="rs",
+        help="Error correction coding mode",
+    )
+    parser.add_argument("--nsym", type=int, default=10, help="Reed-Solomon parity symbols")
+
+    args = parser.parse_args(list(argv))
+    if args.password:
+        console.print("[yellow]Password-based encryption is not yet supported for cover generation.[/yellow]")
+
+    quality = _quality_from_pairs(args.quality)
+
+    secret = _read_bytes(args.input_path)
+
+    ecc_mode, degraded = _resolve_ecc(args.ecc)
+    if degraded:
+        console.print("[yellow]Reed-Solomon ECC unavailable; continuing without ECC.[/yellow]")
+
+    try:
+        cover_text = api_cover_generate(
+            secret,
+            seed_text=args.seed_text,
+            quality=quality,
+            chunk_bytes=args.chunk_bytes,
+            use_crc=args.crc == "on",
+            ecc=ecc_mode,
+            nsym=args.nsym,
+        )
+    except (ConfigurationError, NeuralStegoError, RuntimeError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        return 1
+
+    _write_text(args.output_path, cover_text)
+    return 0
+
+
+def _handle_cover_reveal(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="neuralstego cover-reveal",
+        description="Reveal embedded secret data from a cover text.",
+    )
+    parser.add_argument("-p", "--password", help="Optional password for decryption (not yet supported)")
+    parser.add_argument("-i", "--in", dest="input_path", default="-", help="Cover text input (default: stdin)")
+    parser.add_argument("-o", "--out", dest="output_path", default="-", help="Recovered secret output (default: stdout)")
+    parser.add_argument("--seed", dest="seed_text", default="", help="Seed text used during encoding")
+    parser.add_argument(
+        "--quality",
+        action="append",
+        nargs=2,
+        metavar=("KEY", "VALUE"),
+        help="Quality parameter override as key/value pairs",
+    )
+    parser.add_argument("--crc", choices=["on", "off"], default="on", help="Enable or disable CRC32")
+    parser.add_argument(
+        "--ecc",
+        choices=["auto", "none", "rs"],
+        default="rs",
+        help="Error correction coding mode",
+    )
+    parser.add_argument("--nsym", type=int, default=10, help="Reed-Solomon parity symbols")
+
+    args = parser.parse_args(list(argv))
+    if args.password:
+        console.print("[yellow]Password-based decryption is not yet supported for cover reveal.[/yellow]")
+
+    quality = _quality_from_pairs(args.quality)
+
+    ecc_mode, degraded = _resolve_ecc(args.ecc)
+    if degraded:
+        console.print("[yellow]Reed-Solomon ECC unavailable; continuing without ECC.[/yellow]")
+
+    cover_text = _read_text(args.input_path)
+
+    try:
+        secret_bytes = api_cover_reveal(
+            cover_text,
+            seed_text=args.seed_text,
+            quality=quality,
+            use_crc=args.crc == "on",
+            ecc=ecc_mode,
+            nsym=args.nsym,
+        )
+    except MissingChunksError as exc:
+        console.print("[red]Error:[/red] Missing chunk indices: " + ", ".join(map(str, exc.missing_indices)))
+        if exc.partial_payload:
+            console.print("[yellow]Writing partial payload despite missing chunks.[/yellow]")
+            try:
+                text = exc.partial_payload.decode("utf-8")
+            except UnicodeDecodeError:
+                console.print("[red]Error:[/red] Partial payload is not valid UTF-8.")
+                return 1
+            _write_text(args.output_path, text)
+        return 1
+    except (ConfigurationError, NeuralStegoError, RuntimeError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        return 1
+
+    try:
+        secret_text = secret_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        console.print(f"[red]Error:[/red] Failed to decode secret as UTF-8: {exc}")
+        return 1
+
+    _write_text(args.output_path, secret_text)
+    return 0
+
+
 def _handle_codec_encode(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="neuralstego codec-encode",
@@ -573,7 +704,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Command line interface for the neural steganography toolkit.",
     )
     subparsers = parser.add_subparsers(dest="command")
-    for command in ["encrypt", "decrypt", "encode", "decode", "codec-encode", "codec-decode"]:
+    for command in [
+        "encrypt",
+        "decrypt",
+        "encode",
+        "decode",
+        "cover-generate",
+        "cover-reveal",
+        "codec-encode",
+        "codec-decode",
+    ]:
         subparsers.add_parser(command)
     return parser
 
@@ -594,6 +734,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         return _handle_encode(rest)
     if command == "decode":
         return _handle_decode(rest)
+    if command == "cover-generate":
+        return _handle_cover_generate(rest)
+    if command == "cover-reveal":
+        return _handle_cover_reveal(rest)
     if command == "codec-encode":
         return _handle_codec_encode(rest)
     if command == "codec-decode":
