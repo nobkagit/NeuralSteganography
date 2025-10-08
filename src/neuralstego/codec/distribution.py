@@ -110,7 +110,7 @@ class TransformersLM(LMProvider):
         model = self._ensure_model()
         context = tuple(context_ids)
         if not context:
-            raise ValueError("context_ids must contain at least one token")
+            context = (self._default_context_token(model),)
         if self._max_context is None:
             context_window = getattr(model.config, "n_positions", None)
         else:
@@ -171,6 +171,50 @@ class TransformersLM(LMProvider):
             self.tokenizer = self._load_tokenizer()
         return self.tokenizer
 
+    def _default_context_token(self, model: GPT2LMHeadModel) -> int:
+        """Return a safe default token id for empty contexts."""
+
+        token_id = _first_token_id(getattr(model.config, "bos_token_id", None))
+        if token_id is None:
+            token_id = _first_token_id(getattr(model.config, "bos_token_ids", None))
+        if token_id is None:
+            token_id = _first_token_id(getattr(model.config, "eos_token_id", None))
+        if token_id is None:
+            token_id = _first_token_id(getattr(model.config, "eos_token_ids", None))
+
+        tokenizer = self.ensure_tokenizer()
+        if token_id is None and tokenizer is not None:
+            token_id = _first_token_id(getattr(tokenizer, "bos_token_id", None))
+            if token_id is None:
+                token_id = _first_token_id(getattr(tokenizer, "bos_token_ids", None))
+            if token_id is None:
+                token_id = _first_token_id(getattr(tokenizer, "eos_token_id", None))
+            if token_id is None:
+                token_id = _first_token_id(getattr(tokenizer, "eos_token_ids", None))
+            if token_id is None:
+                encode = getattr(tokenizer, "encode", None)
+                if callable(encode):
+                    for candidate in (
+                        getattr(tokenizer, "bos_token", None),
+                        getattr(tokenizer, "eos_token", None),
+                        " ",
+                    ):
+                        if isinstance(candidate, str) and candidate:
+                            tokens = encode(candidate, add_special_tokens=False)
+                            if not tokens:
+                                tokens = encode(candidate)
+                            if tokens:
+                                token_id = int(tokens[0])
+                                break
+
+        if token_id is None:
+            vocab_size = getattr(model.config, "vocab_size", 0)
+            if isinstance(vocab_size, int) and vocab_size > 0:
+                return 0
+            return 0
+
+        return int(token_id)
+
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
     logits = logits.astype(np.float64, copy=True)
@@ -190,6 +234,18 @@ def _clone_distribution(dist: ProbDist) -> ProbDist:
     if isinstance(dist, dict):
         return dict(dist)
     raise TypeError(f"Unsupported distribution type: {type(dist)!r}")
+
+
+def _first_token_id(candidate: Any) -> int | None:
+    """Extract the first integer token id from a config or tokenizer attribute."""
+
+    if isinstance(candidate, int):
+        return int(candidate)
+    if isinstance(candidate, Sequence) and candidate:
+        for value in candidate:
+            if isinstance(value, int):
+                return int(value)
+    return None
 
 
 __all__ = ["MockLM", "CachedLM", "TransformersLM"]
