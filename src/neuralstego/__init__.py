@@ -1,5 +1,2 @@
-"""NeuralSteganography package."""
+"""Neural steganography helpers."""
 
-__all__ = [
-    "cli",
-]
