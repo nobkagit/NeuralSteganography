@@ -47,3 +47,10 @@ An example of encoding and decoding a message is in `run_single.py`. The algorit
     abstract = "Whereas traditional cryptography encrypts a secret message into an unintelligible form, steganography conceals that communication is taking place by encoding a secret message into a cover signal. Language is a particularly pragmatic cover signal due to its benign occurrence and independence from any one medium. Traditionally, linguistic steganography systems encode secret messages in existing text via synonym substitution or word order rearrangements. Advances in neural language models enable previously impractical generation-based techniques. We propose a steganography technique based on arithmetic coding with large-scale neural language models. We find that our approach can generate realistic looking cover sentences as evaluated by humans, while at the same time preserving security by matching the cover message distribution with the language model distribution."
 }
 ```
+## Differences from upstream run_single.py
+
+Compared to the original HarvardNLP repository, this fork keeps the encoding/decoding logic identical but wraps it in an
+`argparse` command-line interface. You can now provide the secret message and tuning parameters (mode, block size,
+precision, temperature, etc.) as flags instead of editing variables inside the script. By default, running
+`python run_single.py` behaves exactly like the upstream example, but optional arguments let you customize the run without
+modifying the source code.
