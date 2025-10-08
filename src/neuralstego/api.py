@@ -25,6 +25,8 @@ from .codec import assemble_bytes, build_packet, chunk_bytes, make_msg_id, parse
 from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
 from .codec.arithmetic import decode_with_lm as codec_decode_with_lm
 from .codec.arithmetic import encode_with_lm as codec_encode_with_lm
+from .codec.textio import seed_to_ids, spans_to_text, text_to_spans
+from .lm import load_lm
 from .codec.types import LMProvider as CodecLMBase
 from .exceptions import ConfigurationError, MissingChunksError
 
@@ -328,6 +330,152 @@ def _ensure_lm(candidate: Any) -> LMProvider:
         return _CodecLMAdapter(cast(CodecLMBase, candidate))
 
     raise TypeError("language model must implement arithmetic encode/decode or next_token_probs")
+
+
+def _default_cover_lm() -> LMProvider:
+    try:
+        return cast(LMProvider, load_lm("gpt2-fa"))
+    except Exception as exc:  # pragma: no cover - propagates loader errors
+        raise ConfigurationError("failed to load default language model") from exc
+
+
+def _ensure_cover_lm(lm: LMProvider | None) -> LMProvider:
+    if lm is None:
+        return _default_cover_lm()
+    return _ensure_lm(lm)
+
+
+def _resolve_tokenizer(candidate: Any):
+    tokenizer = getattr(candidate, "tokenizer", None)
+    if tokenizer is not None:
+        return tokenizer
+
+    try:
+        from .lm.transformers_adapter import TransformersLM
+    except Exception as exc:  # pragma: no cover - dependency missing path
+        raise ConfigurationError("language model tokenizer unavailable") from exc
+
+    helper = TransformersLM()
+    return helper.tokenizer
+
+
+def _normalise_secret(secret: bytes | str) -> bytes:
+    if isinstance(secret, bytes):
+        return secret
+    if isinstance(secret, str):
+        return secret.encode("utf-8")
+    raise TypeError("secret must be bytes or string")
+
+
+def _parse_spans_payload(payload: str) -> List[List[int]]:
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(
+            "cover text parsing not implemented; provide spans JSON input"
+        ) from exc
+
+    if isinstance(decoded, Mapping):
+        spans_obj = decoded.get("spans")
+    else:
+        spans_obj = decoded
+
+    if not isinstance(spans_obj, Sequence):
+        raise ConfigurationError("spans payload must be a sequence")
+
+    spans: List[List[int]] = []
+    for entry in spans_obj:
+        if not isinstance(entry, Sequence):
+            raise ConfigurationError("span entry must be a sequence of integers")
+        spans.append([int(value) for value in entry])
+
+    return spans
+
+
+def cover_generate(
+    secret: bytes | str,
+    *,
+    seed_text: str,
+    quality: Mapping[str, object] | None = None,
+    chunk_bytes: int = 256,
+    use_crc: bool = True,
+    ecc: str = "rs",
+    nsym: int = 10,
+    lm: LMProvider | None = None,
+) -> str:
+    """Generate a natural-language cover string embedding *secret* information."""
+
+    payload = _normalise_secret(secret)
+    lm_provider = _ensure_cover_lm(lm)
+
+    quality_args = _normalise_quality_dict(quality)
+
+    encode_result = stego_encode(
+        payload,
+        chunk_bytes=chunk_bytes,
+        use_crc=use_crc,
+        ecc=ecc,
+        nsym=nsym,
+        quality=quality_args,
+        seed_text=seed_text,
+        lm=lm_provider,
+    )
+
+    spans = [list(map(int, span)) for span in encode_result]
+
+    try:
+        tokenizer = _resolve_tokenizer(lm_provider)
+    except ConfigurationError:
+        tokenizer = None
+
+    if tokenizer is None:
+        raise ConfigurationError("language model tokenizer unavailable for cover rendering")
+
+    seed_ids = seed_to_ids(seed_text, tokenizer)
+    cover_text = spans_to_text(spans, seed_ids, tokenizer)
+    return cover_text
+
+
+def cover_reveal(
+    cover_text: str,
+    *,
+    seed_text: str,
+    quality: Mapping[str, object] | None = None,
+    use_crc: bool = True,
+    ecc: str = "rs",
+    nsym: int = 10,
+    lm: LMProvider | None = None,
+) -> bytes:
+    """Recover the secret payload embedded within ``cover_text``."""
+
+    lm_provider = _ensure_cover_lm(lm)
+    quality_args = _normalise_quality_dict(quality)
+
+    try:
+        tokenizer = _resolve_tokenizer(lm_provider)
+    except ConfigurationError:
+        tokenizer = None
+
+    spans: List[List[int]]
+    if tokenizer is not None:
+        try:
+            seed_ids = seed_to_ids(seed_text, tokenizer)
+            spans = text_to_spans(cover_text, seed_ids, tokenizer)
+        except NotImplementedError:
+            spans = _parse_spans_payload(cover_text)
+    else:
+        spans = _parse_spans_payload(cover_text)
+
+    result = stego_decode(
+        spans,
+        use_crc=use_crc,
+        ecc=ecc,
+        nsym=nsym,
+        quality=quality_args,
+        seed_text=seed_text,
+        lm=lm_provider,
+    )
+    return result
 
 
 def stego_encode(
@@ -644,6 +792,8 @@ __all__ = [
     "EncodeResult",
     "LMProvider",
     "chunk_bytes_func",
+    "cover_generate",
+    "cover_reveal",
     "decode_text",
     "encode_text",
     "stego_decode",

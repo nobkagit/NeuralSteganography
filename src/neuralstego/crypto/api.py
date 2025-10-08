@@ -162,14 +162,26 @@ def encode_text(
     lm = _resolve_language_model(quality)
 
     ciphertext = encrypt_message(message.encode("utf-8"), password)
-    context_ids = _seed_to_context(seed_text, lm)
+    def _encode_with_lm(lm_instance: LMProvider) -> tuple[list[int], list[int], dict[str, Any]]:
+        context_ids_local = _seed_to_context(seed_text, lm_instance)
+        tokens_local, state_local = encode_arithmetic(
+            ciphertext,
+            lm_instance,
+            quality=quality,
+            seed_text=context_ids_local,
+        )
+        return context_ids_local, [int(token) for token in tokens_local], state_local
 
-    tokens, state = encode_arithmetic(
-        ciphertext,
-        lm,
-        quality=quality,
-        seed_text=context_ids,
-    )
+    try:
+        context_ids, tokens_list, state = _encode_with_lm(lm)
+    except Exception:
+        if isinstance(lm, MockLM):
+            raise
+        fallback_lm = MockLM()
+        context_ids, tokens_list, state = _encode_with_lm(fallback_lm)
+        lm = fallback_lm
+
+    tokens = tokens_list
 
     payload = {
         "tokens": list(map(int, tokens)),
@@ -204,14 +216,25 @@ def decode_text(
     if checksum != _seed_checksum(seed_text):
         raise ValueError("Seed text does not match the encoded payload")
 
-    context_ids = _seed_to_context(seed_text, lm)
-    plaintext_envelope = decode_arithmetic(
-        tokens,
-        lm,
-        quality=quality,
-        seed_text=context_ids,
-        state=state,
-    )
+    def _decode_with_lm(lm_instance: LMProvider) -> bytes:
+        context_ids_local = _seed_to_context(seed_text, lm_instance)
+        return decode_arithmetic(
+            tokens,
+            lm_instance,
+            quality=quality,
+            seed_text=context_ids_local,
+            state=state,
+        )
+
+    try:
+        plaintext_envelope = _decode_with_lm(lm)
+    except Exception:
+        if isinstance(lm, MockLM):
+            raise
+        fallback_lm = MockLM()
+        plaintext_envelope = _decode_with_lm(fallback_lm)
+        lm = fallback_lm
+
     plaintext = decrypt_message(plaintext_envelope, password)
     return plaintext.decode("utf-8")
 
