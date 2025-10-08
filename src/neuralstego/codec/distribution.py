@@ -110,7 +110,9 @@ class TransformersLM(LMProvider):
         model = self._ensure_model()
         context = tuple(context_ids)
         if not context:
-            raise ValueError("context_ids must contain at least one token")
+            context = self._default_context(model)
+            if not context:
+                raise ValueError("context_ids must contain at least one token")
         if self._max_context is None:
             context_window = getattr(model.config, "n_positions", None)
         else:
@@ -170,6 +172,58 @@ class TransformersLM(LMProvider):
         if self.tokenizer is None:
             self.tokenizer = self._load_tokenizer()
         return self.tokenizer
+
+    def _default_context(self, model: GPT2LMHeadModel) -> tuple[int, ...] | None:
+        """Return a fallback context tuple when none is provided."""
+
+        config = getattr(model, "config", None)
+        for attr in ("bos_token_id", "decoder_start_token_id", "eos_token_id"):
+            token_id = getattr(config, attr, None) if config is not None else None
+            if isinstance(token_id, int) and token_id >= 0:
+                return (int(token_id),)
+            if isinstance(token_id, (list, tuple)) and token_id:
+                return (int(token_id[0]),)
+
+        tokenizer = None
+        if self.tokenizer is not None:
+            tokenizer = self.tokenizer
+        elif self._tokenizer_loader is not None:
+            tokenizer = self.ensure_tokenizer()
+        if tokenizer is not None:
+            for attr in ("bos_token_id", "cls_token_id", "eos_token_id"):
+                token_id = getattr(tokenizer, attr, None)
+                if isinstance(token_id, int) and token_id >= 0:
+                    return (int(token_id),)
+                if isinstance(token_id, (list, tuple)) and token_id:
+                    return (int(token_id[0]),)
+
+            for attr in ("bos_token", "cls_token", "eos_token"):
+                token = getattr(tokenizer, attr, None)
+                if token:
+                    converter = getattr(tokenizer, "convert_tokens_to_ids", None)
+                    if callable(converter):
+                        converted = converter(token)
+                        if isinstance(converted, int) and converted >= 0:
+                            return (int(converted),)
+                        if isinstance(converted, (list, tuple)) and converted:
+                            return (int(converted[0]),)
+
+            encoder = getattr(tokenizer, "encode", None)
+            if callable(encoder):
+                try:
+                    encoded = encoder("", add_special_tokens=True)
+                except TypeError:
+                    encoded = encoder("")
+                if isinstance(encoded, Sequence):
+                    for value in encoded:
+                        try:
+                            token_id = int(value)
+                        except (TypeError, ValueError):
+                            continue
+                        if token_id >= 0:
+                            return (token_id,)
+
+        return None
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:

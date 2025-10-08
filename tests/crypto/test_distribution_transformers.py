@@ -17,7 +17,7 @@ class DummyGPT2Model:
     def __init__(self, vocab_size: int = 8) -> None:
         self.vocab_size = vocab_size
         self.device = torch.device("cpu")
-        self.config = SimpleNamespace(n_positions=32)
+        self.config = SimpleNamespace(n_positions=32, bos_token_id=0, eos_token_id=vocab_size - 1)
 
     def to(self, device: torch.device | str | None = None, dtype: torch.dtype | None = None) -> "DummyGPT2Model":
         if device is not None:
@@ -61,6 +61,16 @@ def test_quality_policies_limit_distribution_support() -> None:
     probs_topp = lm_topp.next_token_probs(context)
     assert pytest.approx(1.0) == float(probs_topp.sum())
     assert np.count_nonzero(probs_topp) <= 4
+
+
+def test_transformers_lm_infers_default_context() -> None:
+    model = DummyGPT2Model(vocab_size=5)
+    lm = TransformersLM(model=model)
+
+    probs = lm.next_token_probs([])
+
+    assert isinstance(probs, np.ndarray)
+    assert probs.shape == (5,)
 
 
 def test_temperature_adjustment_changes_distribution_shape() -> None:
