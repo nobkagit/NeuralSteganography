@@ -22,6 +22,7 @@ from typing import (
 )
 
 from .codec import assemble_bytes, build_packet, chunk_bytes, make_msg_id, parse_packet
+from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
 from .codec.arithmetic import decode_with_lm as codec_decode_with_lm
 from .codec.arithmetic import encode_with_lm as codec_encode_with_lm
 from .codec.types import LMProvider as CodecLMBase
@@ -68,6 +69,20 @@ _DEFAULT_QUALITY = {
 }
 
 
+_QUALITY_KEY_ALIASES = {
+    "temperature": "temp",
+    "top-k": "top_k",
+    "topk": "top_k",
+    "top_p": "top_p",
+    "top-p": "top_p",
+    "cap-per-token-bits": "cap_per_token_bits",
+    "cap_bits_per_token": "cap_per_token_bits",
+    "cap-bits-per-token": "cap_per_token_bits",
+    "max-context": "max_context",
+    "maxContext": "max_context",
+}
+
+
 def _normalise_ecc(ecc: Optional[str]) -> str:
     if not ecc:
         return "none"
@@ -104,19 +119,30 @@ def _context_tokens(lm: LMProvider, seed_text: str) -> List[int]:
 CodecState = Dict[str, Any]
 
 
+def _normalise_quality_dict(quality: Mapping[str, object] | None) -> Dict[str, Any]:
+    if not quality:
+        return {}
+
+    normalised: Dict[str, Any] = {}
+    for key, value in quality.items():
+        canonical = _QUALITY_KEY_ALIASES.get(key, key)
+        normalised[canonical] = value
+    return normalised
+
+
 def _codec_quality_arguments(
     quality: Mapping[str, object] | None,
 ) -> Tuple[Dict[str, Any], Optional[int]]:
     if not quality:
         return {}, None
 
+    quality = _normalise_quality_dict(quality)
+
     policies: Dict[str, Any] = {}
     max_context: Optional[int] = None
 
     if "top_k" in quality and quality["top_k"] is not None:
         policies["top_k"] = int(quality["top_k"])
-    if "topk" in quality and "top_k" not in policies and quality["topk"] is not None:
-        policies["top_k"] = int(quality["topk"])
 
     if "top_p" in quality and quality["top_p"] is not None:
         policies["top_p"] = float(quality["top_p"])
@@ -126,12 +152,6 @@ def _codec_quality_arguments(
 
     if "cap_per_token_bits" in quality and quality["cap_per_token_bits"] is not None:
         policies["cap_per_token_bits"] = int(quality["cap_per_token_bits"])
-    if (
-        "cap_bits_per_token" in quality
-        and policies.get("cap_per_token_bits") is None
-        and quality["cap_bits_per_token"] is not None
-    ):
-        policies["cap_per_token_bits"] = int(quality["cap_bits_per_token"])
 
     if "max_context" in quality and quality["max_context"] is not None:
         max_context = int(quality["max_context"])
@@ -330,7 +350,7 @@ def stego_encode(
         "ecc": ecc_mode,
         "nsym": int(nsym if ecc_mode == "rs" else 0),
     }
-    quality_args = {**_DEFAULT_QUALITY, **(quality or {})}
+    quality_args = {**_DEFAULT_QUALITY, **_normalise_quality_dict(quality)}
 
     chunks = chunk_bytes_func(message, chunk_size=cfg["chunk_bytes"])
     msg_id = make_msg_id()
@@ -373,7 +393,7 @@ def stego_decode(
         "ecc": ecc_mode,
         "nsym": int(nsym if ecc_mode == "rs" else 0),
     }
-    quality_args = {**_DEFAULT_QUALITY, **(quality or {})}
+    quality_args = {**_DEFAULT_QUALITY, **_normalise_quality_dict(quality)}
 
     payload_by_seq: Dict[int, bytes] = {}
     msg_id: Optional[str] = None
@@ -430,15 +450,20 @@ def encode_text(
         raise TypeError("message must be bytes-like")
 
     payload = bytes(message)
-    quality_args = dict(quality or {})
+    quality_args = _normalise_quality_dict(quality)
     lm_adapter = _ensure_lm(lm)
+
+    ecc_mode = _normalise_ecc(ecc)
+    if ecc_mode == "rs" and _RSCodec is None:
+        ecc_mode = "none"
+    effective_nsym = int(nsym if ecc_mode == "rs" else 0)
 
     encode_result = stego_encode(
         payload,
         chunk_bytes=chunk_bytes,
         use_crc=use_crc,
-        ecc=ecc,
-        nsym=nsym,
+        ecc=ecc_mode,
+        nsym=effective_nsym,
         quality=quality_args,
         seed_text=seed_text,
         lm=lm_adapter,
@@ -464,7 +489,7 @@ def encode_text(
         chunk_entries.append(entry)
 
     cfg = encode_result.metadata.cfg
-    cfg_ecc_raw = cfg.get("ecc", _normalise_ecc(ecc))
+    cfg_ecc_raw = cfg.get("ecc", ecc_mode)
     ecc_payload = (
         _normalise_ecc(cfg_ecc_raw) if isinstance(cfg_ecc_raw, str) or cfg_ecc_raw is None else str(cfg_ecc_raw)
     )
@@ -472,7 +497,7 @@ def encode_text(
         "chunk_bytes": int(cfg.get("chunk_bytes", chunk_bytes)),
         "crc": bool(cfg.get("crc", use_crc)),
         "ecc": ecc_payload,
-        "nsym": int(cfg.get("nsym", nsym)),
+        "nsym": int(cfg.get("nsym", effective_nsym)),
     }
 
     envelope = {
@@ -530,12 +555,15 @@ def decode_text(
 
     use_crc_flag = bool(use_crc) if use_crc is not None else bool(cfg.get("crc", False))
     stored_ecc_value = cfg.get("ecc", "none")
-    ecc_mode = (
-        _normalise_ecc(ecc)
-        if ecc is not None
-        else _normalise_ecc(stored_ecc_value if isinstance(stored_ecc_value, str) else "none")
-    )
+    if ecc is not None:
+        ecc_mode = _normalise_ecc(ecc)
+    else:
+        ecc_mode = _normalise_ecc(stored_ecc_value if isinstance(stored_ecc_value, str) else "none")
+    if ecc_mode == "rs" and _RSCodec is None:
+        ecc_mode = "none"
     nsym_value = int(nsym) if nsym is not None else int(cfg.get("nsym", 0))
+    if ecc_mode != "rs":
+        nsym_value = 0
 
     chunks = envelope.get("chunks")
     if not isinstance(chunks, Sequence):
@@ -588,7 +616,7 @@ def decode_text(
         state_payloads.append(state_map.get(seq))
 
     lm_adapter = _ensure_lm(lm)
-    quality_args = dict(quality or {})
+    quality_args = _normalise_quality_dict(quality)
 
     if isinstance(lm_adapter, _CodecLMAdapter):
         if any(state is None for state in state_payloads):
