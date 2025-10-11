@@ -83,6 +83,13 @@ neuralstego cover-reveal -p "Pa$$w0rd" -i cover.txt -o recovered.txt \
   --seed "در یک گفت‌وگوی کوتاه درباره‌ی فناوری و اخبار روز صحبت می‌کنیم."
 
 neuralstego quality-audit -i cover.txt --max-ppl 100 --max-ngram-repeat 0.25 --min-ttr 0.30
+
+# اجرای نمونهٔ آمادهٔ داخلی
+neuralstego cover-walkthrough --sample
+
+# نمایش مرحله‌به‌مرحلهٔ فرایند برای پیام دلخواه
+neuralstego cover-walkthrough --message "سلام این یک راز است" \
+  --seed-text "در مورد یک گفت‌وگو صحبت می‌کنیم." --quality.temp 0.8 --quality.top_p 0.9
 ```
 
 ## ساختار معماری و فازها
