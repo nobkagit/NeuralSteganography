@@ -14,7 +14,6 @@ from typing import (
     Iterable,
     List,
     Mapping,
-    MutableMapping,
     Optional,
     Protocol,
     Sequence,
@@ -23,17 +22,21 @@ from typing import (
 )
 
 try:  # pragma: no cover - optional dependency for pretty logging
-    from rich.console import Console
+    from rich.console import Console  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - graceful fallback when rich is absent
-    Console = None  # type: ignore[assignment]
+    Console = None
 
 from .codec import assemble_bytes, build_packet, chunk_bytes, make_msg_id, parse_packet
 from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
-from .codec.arithmetic import decode_with_lm as codec_decode_with_lm
-from .codec.arithmetic import encode_with_lm as codec_encode_with_lm
+from .codec.arithmetic import (
+    _coerce_optional_float,
+    _coerce_optional_int,
+    decode_with_lm as codec_decode_with_lm,
+    encode_with_lm as codec_encode_with_lm,
+)
 from .codec.textio import seed_to_ids, spans_to_text, text_to_spans
 from .lm import load_lm
-from .codec.types import LMProvider as CodecLMBase
+from .codec.types import CodecState, LMProvider as CodecLMBase
 from .exceptions import ConfigurationError, MissingChunksError, QualityGateError
 from .detect.guard import GuardResult, QualityGuard
 from .metrics import LMScorer
@@ -43,12 +46,12 @@ class LMProvider(Protocol):
     """Protocol implemented by language model wrappers used for arithmetic coding."""
 
     def encode_arithmetic(
-        self, bits: List[int], context: List[int], *, quality: Dict[str, float]
+        self, bits: List[int], context: List[int], *, quality: Mapping[str, object]
     ) -> List[int]:
         ...
 
     def decode_arithmetic(
-        self, tokens: List[int], context: List[int], *, quality: Dict[str, float]
+        self, tokens: List[int], context: List[int], *, quality: Mapping[str, object]
     ) -> List[int]:
         ...
 
@@ -174,9 +177,6 @@ def _context_tokens(lm: LMProvider, seed_text: str) -> List[int]:
     return lm.encode_seed(seed_text)
 
 
-CodecState = Dict[str, Any]
-
-
 def _normalise_quality_dict(quality: Mapping[str, object] | None) -> Dict[str, Any]:
     if not quality:
         return {}
@@ -200,25 +200,33 @@ def _codec_quality_arguments(
     max_context: Optional[int] = None
 
     if "top_k" in quality and quality["top_k"] is not None:
-        policies["top_k"] = int(quality["top_k"])
+        top_k = _coerce_optional_int(quality["top_k"], "top_k")
+        if top_k is not None:
+            policies["top_k"] = top_k
 
     if "top_p" in quality and quality["top_p"] is not None:
-        policies["top_p"] = float(quality["top_p"])
+        top_p = _coerce_optional_float(quality["top_p"], "top_p")
+        if top_p is not None:
+            policies["top_p"] = top_p
 
     if "min_prob" in quality and quality["min_prob"] is not None:
-        policies["min_prob"] = float(quality["min_prob"])
+        min_prob = _coerce_optional_float(quality["min_prob"], "min_prob")
+        if min_prob is not None:
+            policies["min_prob"] = min_prob
 
     if "cap_per_token_bits" in quality and quality["cap_per_token_bits"] is not None:
-        policies["cap_per_token_bits"] = int(quality["cap_per_token_bits"])
+        cap_bits = _coerce_optional_int(quality["cap_per_token_bits"], "cap_per_token_bits")
+        if cap_bits is not None:
+            policies["cap_per_token_bits"] = cap_bits
 
     if "max_context" in quality and quality["max_context"] is not None:
-        max_context = int(quality["max_context"])
+        max_context = _coerce_optional_int(quality["max_context"], "max_context")
 
     filtered = {key: value for key, value in policies.items() if value is not None}
     return filtered, max_context
 
 
-def _extract_codec_state(state: MutableMapping[str, object]) -> CodecState:
+def _extract_codec_state(state: Mapping[str, object]) -> CodecState:
     history_raw = state.get("history", ())
     if isinstance(history_raw, Sequence):
         history = [int(value) for value in history_raw]
@@ -331,11 +339,11 @@ class _CodecLMAdapter(LMProvider):
         return list(text.encode("utf-8"))
 
     def encode_arithmetic(
-        self, bits: List[int], context: List[int], *, quality: Dict[str, float]
+        self, bits: List[int], context: List[int], *, quality: Mapping[str, object]
     ) -> List[int]:
         payload = _bits_to_bytes(bits)
         quality_args, max_context = _codec_quality_arguments(quality)
-        state: MutableMapping[str, object] = {}
+        state: CodecState = {}
         tokens = codec_encode_with_lm(
             payload,
             self._base,
@@ -348,15 +356,18 @@ class _CodecLMAdapter(LMProvider):
         return [int(token) for token in tokens]
 
     def decode_arithmetic(
-        self, tokens: List[int], context: List[int], *, quality: Dict[str, float]
+        self, tokens: List[int], context: List[int], *, quality: Mapping[str, object]
     ) -> List[int]:
         if not self._decode_states:
             raise ConfigurationError("decode state unavailable for codec language model")
 
         state_payload = self._decode_states.popleft()
-        decode_state: MutableMapping[str, object] = {
-            "history": tuple(int(value) for value in state_payload.get("history", ())),
-            "residual_bits": state_payload.get("residual_bits", b""),
+        extracted = _extract_codec_state(state_payload)
+        history_seq = cast(Sequence[int], extracted.get("history", ()))
+        residual_bits = extracted.get("residual_bits", b"")
+        decode_state: CodecState = {
+            "history": tuple(history_seq),
+            "residual_bits": bytes(residual_bits),
         }
         quality_args, max_context = _codec_quality_arguments(quality)
         payload = codec_decode_with_lm(
@@ -711,7 +722,7 @@ def stego_encode(
     use_crc: bool = True,
     ecc: str | None = "rs",
     nsym: int = 10,
-    quality: Optional[Dict[str, float]] = None,
+    quality: Mapping[str, object] | None = None,
     seed_text: str = "",
     lm: LMProvider,
 ) -> EncodeResult:
@@ -726,7 +737,8 @@ def stego_encode(
     }
     quality_args = {**_DEFAULT_QUALITY, **_normalise_quality_dict(quality)}
 
-    chunks = chunk_bytes_func(message, chunk_size=cfg["chunk_bytes"])
+    chunk_size = cast(int, cfg["chunk_bytes"])
+    chunks = chunk_bytes_func(message, chunk_size=chunk_size)
     msg_id = make_msg_id()
     total = len(chunks)
 
@@ -755,7 +767,7 @@ def stego_decode(
     use_crc: bool = True,
     ecc: str | None = "rs",
     nsym: int = 10,
-    quality: Optional[Dict[str, float]] = None,
+    quality: Mapping[str, object] | None = None,
     seed_text: str = "",
     lm: LMProvider,
 ) -> bytes:
@@ -868,11 +880,21 @@ def encode_text(
     ecc_payload = (
         _normalise_ecc(cfg_ecc_raw) if isinstance(cfg_ecc_raw, str) or cfg_ecc_raw is None else str(cfg_ecc_raw)
     )
+    chunk_bytes_value = cfg.get("chunk_bytes", chunk_bytes)
+    chunk_bytes_serial = _coerce_optional_int(chunk_bytes_value, "chunk_bytes")
+    if chunk_bytes_serial is None:
+        chunk_bytes_serial = int(chunk_bytes)
+
+    nsym_value = cfg.get("nsym", effective_nsym)
+    nsym_serial = _coerce_optional_int(nsym_value, "nsym")
+    if nsym_serial is None:
+        nsym_serial = int(effective_nsym)
+
     cfg_payload = {
-        "chunk_bytes": int(cfg.get("chunk_bytes", chunk_bytes)),
+        "chunk_bytes": chunk_bytes_serial,
         "crc": bool(cfg.get("crc", use_crc)),
         "ecc": ecc_payload,
-        "nsym": int(cfg.get("nsym", effective_nsym)),
+        "nsym": nsym_serial,
     }
 
     envelope = {

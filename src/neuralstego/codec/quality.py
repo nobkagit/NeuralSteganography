@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
+from numpy.typing import NDArray
 
 from .errors import QualityConfigError
 from .types import ProbDist
@@ -141,14 +142,14 @@ def cap_bits_per_token(dist: ProbDist, cap_per_token_bits: int) -> ProbDist:
     return _arrays_to_dist(tokens, target, dist)
 
 
-def _dist_to_arrays(dist: ProbDist) -> tuple[np.ndarray, np.ndarray]:
+def _dist_to_arrays(dist: ProbDist) -> tuple[NDArray[np.int_], NDArray[np.float64]]:
     if isinstance(dist, np.ndarray):
-        probs = dist.astype(np.float64, copy=True)
+        probs = np.asarray(dist, dtype=np.float64)
         tokens = np.arange(probs.size, dtype=np.int64)
     elif isinstance(dist, dict):
         items = sorted(dist.items())
-        tokens = np.array([token for token, _ in items], dtype=np.int64)
-        probs = np.array([prob for _, prob in items], dtype=np.float64)
+        tokens = np.array([int(token) for token, _ in items], dtype=np.int64)
+        probs = np.array([float(prob) for _, prob in items], dtype=np.float64)
     else:
         raise TypeError(f"Unsupported distribution type: {type(dist)!r}")
 
@@ -159,8 +160,8 @@ def _dist_to_arrays(dist: ProbDist) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _arrays_to_dist(
-    tokens: np.ndarray,
-    probs: np.ndarray,
+    tokens: NDArray[np.int_],
+    probs: NDArray[np.float64],
     original: ProbDist,
 ) -> ProbDist:
     if isinstance(original, np.ndarray):
@@ -171,14 +172,14 @@ def _arrays_to_dist(
     return mapping
 
 
-def _normalise(probs: np.ndarray) -> np.ndarray:
+def _normalise(probs: NDArray[np.float64]) -> NDArray[np.float64]:
     total = probs.sum()
     if not math.isfinite(total) or total <= 0.0:
         raise QualityConfigError("Probability mass vanished after filtering")
     return probs / total
 
 
-def _entropy_bits(probs: np.ndarray) -> float:
+def _entropy_bits(probs: NDArray[np.float64]) -> float:
     mask = probs > 0.0
     if not np.any(mask):
         return 0.0
@@ -186,7 +187,7 @@ def _entropy_bits(probs: np.ndarray) -> float:
     return float(-(values * np.log2(values)).sum())
 
 
-def _apply_temperature(probs: np.ndarray, tau: float) -> np.ndarray:
+def _apply_temperature(probs: NDArray[np.float64], tau: float) -> NDArray[np.float64]:
     if tau <= 0.0:
         raise QualityConfigError("temperature must be positive")
     if math.isclose(tau, 1.0):
