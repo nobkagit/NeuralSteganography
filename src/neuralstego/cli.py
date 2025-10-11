@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when rich is unavaila
             print(text)
 
 from .api import (
+    DEFAULT_GATE_THRESHOLDS,
     cover_generate as api_cover_generate,
     cover_reveal as api_cover_reveal,
     decode_text as codec_decode_text,
@@ -28,9 +29,19 @@ from .api import (
 from .codec.distribution import MockLM
 from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
 from .crypto.errors import DecryptionError, EncryptionError
-from .exceptions import ConfigurationError, MissingChunksError, NeuralStegoError
+from .exceptions import (
+    ConfigurationError,
+    MissingChunksError,
+    NeuralStegoError,
+    QualityGateError,
+)
+from .detect.guard import QualityGuard
+from .metrics import LMScorer
 
 console = Console()
+
+
+QUALITY_GUARD = QualityGuard(lm_scorer=LMScorer(prefer_transformers=False))
 
 
 def _get_crypto_api():
@@ -296,6 +307,40 @@ def _quality_from_prefixed(args: Sequence[str], prefix: str) -> Tuple[Dict[str, 
     return quality, remaining
 
 
+def _gate_thresholds_from_namespace(namespace: Any) -> Dict[str, float]:
+    thresholds: Dict[str, float] = {}
+    if getattr(namespace, "max_ppl", None) is not None:
+        thresholds["max_ppl"] = float(namespace.max_ppl)
+    if getattr(namespace, "max_detector_score", None) is not None:
+        thresholds["max_detector_score"] = float(namespace.max_detector_score)
+    if getattr(namespace, "max_ngram_repeat", None) is not None:
+        thresholds["max_ngram_repeat"] = float(namespace.max_ngram_repeat)
+    if getattr(namespace, "min_ttr", None) is not None:
+        thresholds["min_ttr"] = float(namespace.min_ttr)
+    return thresholds
+
+
+def _load_seed_pool_file(path: str | None) -> List[str]:
+    if not path:
+        return []
+    seeds: List[str] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        candidate = line.strip()
+        if candidate:
+            seeds.append(candidate)
+    return seeds
+
+
+def _warn_if_detector_threshold(thresholds: Mapping[str, float]) -> None:
+    if (
+        thresholds.get("max_detector_score") is not None
+        and getattr(QUALITY_GUARD, "classifier", None) is None
+    ):
+        console.print(
+            "[yellow]Detector threshold requested but classifier is not configured; skipping detector check.[/yellow]"
+        )
+
+
 def _load_codec_lm(name: str) -> Any:
     if name.lower() == "mock":
         return MockLM()
@@ -465,6 +510,29 @@ def _handle_cover_generate(argv: Sequence[str]) -> int:
         help="Error correction coding mode",
     )
     parser.add_argument("--nsym", type=int, default=10, help="Reed-Solomon parity symbols")
+    parser.add_argument("--quality-gate", choices=["on", "off"], default="on", help="Enable or disable the quality gate (default: on)")
+    parser.add_argument("--max-ppl", type=float, help="Maximum perplexity before regeneration is triggered")
+    parser.add_argument(
+        "--max-detector-score",
+        type=float,
+        help="Maximum detector score allowed when a classifier is configured",
+    )
+    parser.add_argument(
+        "--max-ngram-repeat",
+        type=float,
+        help="Maximum allowed repeated n-gram ratio",
+    )
+    parser.add_argument("--min-ttr", type=float, help="Minimum acceptable type-token ratio")
+    parser.add_argument(
+        "--regen-attempts",
+        type=int,
+        default=2,
+        help="Number of regeneration attempts when the gate rejects a cover",
+    )
+    parser.add_argument(
+        "--regen-seed-pool",
+        help="File containing alternate seed candidates (one per line) used during regeneration",
+    )
 
     args = parser.parse_args(list(argv))
     if args.password:
@@ -478,6 +546,18 @@ def _handle_cover_generate(argv: Sequence[str]) -> int:
     if degraded:
         console.print("[yellow]Reed-Solomon ECC unavailable; continuing without ECC.[/yellow]")
 
+    gate_enabled = args.quality_gate == "on"
+    thresholds = _gate_thresholds_from_namespace(args)
+    regen_strategy: Dict[str, Any] | None = None
+    seed_pool_override = _load_seed_pool_file(args.regen_seed_pool)
+    if seed_pool_override:
+        regen_strategy = {"seed_pool": seed_pool_override}
+
+    if gate_enabled:
+        _warn_if_detector_threshold(thresholds)
+
+    gate_error: QualityGateError | None = None
+
     try:
         cover_text = api_cover_generate(
             secret,
@@ -487,12 +567,40 @@ def _handle_cover_generate(argv: Sequence[str]) -> int:
             use_crc=args.crc == "on",
             ecc=ecc_mode,
             nsym=args.nsym,
+            quality_gate=gate_enabled,
+            gate_thresholds=thresholds if gate_enabled else None,
+            regen_attempts=args.regen_attempts,
+            regen_strategy=regen_strategy,
+            quality_guard=QUALITY_GUARD,
         )
+    except QualityGateError as exc:
+        cover_text = exc.cover_text
+        gate_error = exc
     except (ConfigurationError, NeuralStegoError, RuntimeError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         return 1
 
     _write_text(args.output_path, cover_text)
+
+    if gate_error is not None:
+        console.print("[red]Quality gate rejected the generated cover.[/red]")
+        if gate_error.metrics:
+            console.print("[cyan]Metrics:[/cyan]")
+            for key, value in sorted(gate_error.metrics.items()):
+                if isinstance(value, float):
+                    display = f"{value:.3f}"
+                else:
+                    display = str(value)
+                console.print(f"  {key}: {display}")
+        if gate_error.reasons:
+            console.print("[yellow]Reasons:[/yellow]")
+            for reason in gate_error.reasons:
+                console.print(f"  - {reason}")
+        console.print(
+            "[yellow]Cover text written despite rejection. Adjust thresholds or disable the gate to continue.[/yellow]"
+        )
+        return 1
+
     return 0
 
 
@@ -565,6 +673,57 @@ def _handle_cover_reveal(argv: Sequence[str]) -> int:
 
     _write_text(args.output_path, secret_text)
     return 0
+
+
+def _handle_quality_audit(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="neuralstego quality-audit",
+        description="Evaluate cover text quality metrics and guard thresholds.",
+    )
+    parser.add_argument("-i", "--in", dest="input_path", required=True, help="Cover text input file")
+    parser.add_argument("--max-ppl", type=float, help="Maximum perplexity threshold")
+    parser.add_argument(
+        "--max-detector-score",
+        type=float,
+        help="Maximum detector score when a classifier is configured",
+    )
+    parser.add_argument(
+        "--max-ngram-repeat",
+        type=float,
+        help="Maximum allowed repeated n-gram ratio",
+    )
+    parser.add_argument("--min-ttr", type=float, help="Minimum acceptable type-token ratio")
+
+    args = parser.parse_args(list(argv))
+
+    text = _read_text(args.input_path)
+    thresholds = dict(DEFAULT_GATE_THRESHOLDS)
+    overrides = _gate_thresholds_from_namespace(args)
+    thresholds.update(overrides)
+
+    if overrides.get("max_detector_score") is not None and getattr(QUALITY_GUARD, "classifier", None) is None:
+        console.print(
+            "[yellow]Detector threshold requested but classifier is not configured; skipping detector check.[/yellow]"
+        )
+
+    result = QUALITY_GUARD.evaluate(text, thresholds)
+
+    console.print("[bold]Quality metrics:[/bold]")
+    for key, value in sorted(result.metrics.items()):
+        if isinstance(value, float):
+            console.print(f"  {key}: {value:.3f}")
+        else:
+            console.print(f"  {key}: {value}")
+
+    verdict_text = "[green]PASS[/green]" if result.passed else "[red]FAIL[/red]"
+    console.print(f"Verdict: {verdict_text}")
+
+    if not result.passed and result.reasons:
+        console.print("[yellow]Reasons:[/yellow]")
+        for reason in result.reasons:
+            console.print(f"  - {reason}")
+
+    return 0 if result.passed else 1
 
 
 def _handle_codec_encode(argv: Sequence[str]) -> int:
@@ -711,6 +870,7 @@ def build_parser() -> argparse.ArgumentParser:
         "decode",
         "cover-generate",
         "cover-reveal",
+        "quality-audit",
         "codec-encode",
         "codec-decode",
     ]:
@@ -738,6 +898,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         return _handle_cover_generate(rest)
     if command == "cover-reveal":
         return _handle_cover_reveal(rest)
+    if command == "quality-audit":
+        return _handle_quality_audit(rest)
     if command == "codec-encode":
         return _handle_codec_encode(rest)
     if command == "codec-decode":

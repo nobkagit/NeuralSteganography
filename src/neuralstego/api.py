@@ -5,6 +5,7 @@ import base64
 import binascii
 import json
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -21,6 +22,11 @@ from typing import (
     cast,
 )
 
+try:  # pragma: no cover - optional dependency for pretty logging
+    from rich.console import Console
+except ModuleNotFoundError:  # pragma: no cover - graceful fallback when rich is absent
+    Console = None  # type: ignore[assignment]
+
 from .codec import assemble_bytes, build_packet, chunk_bytes, make_msg_id, parse_packet
 from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
 from .codec.arithmetic import decode_with_lm as codec_decode_with_lm
@@ -28,7 +34,9 @@ from .codec.arithmetic import encode_with_lm as codec_encode_with_lm
 from .codec.textio import seed_to_ids, spans_to_text, text_to_spans
 from .lm import load_lm
 from .codec.types import LMProvider as CodecLMBase
-from .exceptions import ConfigurationError, MissingChunksError
+from .exceptions import ConfigurationError, MissingChunksError, QualityGateError
+from .detect.guard import GuardResult, QualityGuard
+from .metrics import LMScorer
 
 
 class LMProvider(Protocol):
@@ -63,12 +71,60 @@ class EncodeResult(list):
         self.metadata = metadata
 
 
+@dataclass
+class _AttemptConfig:
+    seed_text: str
+    overrides: Dict[str, Any]
+    seed_variant: str
+
+
 _DEFAULT_QUALITY = {
     "temp": 1.0,
     "precision": 16,
     "topk": 50000,
     "finish_sent": True,
 }
+
+
+DEFAULT_GATE_THRESHOLDS: Dict[str, float] = {
+    "max_ppl": 120.0,
+    "max_ngram_repeat": 0.35,
+    "min_ttr": 0.25,
+    "max_avg_entropy": 5.5,
+}
+
+
+DEFAULT_REGEN_STRATEGY: Dict[str, Any] = {
+    "seed_pool": [
+        "در یک گفت‌وگوی کوتاه درباره‌ی فناوری صحبت می‌کنیم.",
+        "در یک گفت‌وگوی دوستانه درباره‌ی فرهنگ و هنر صحبت می‌کنیم.",
+    ],
+    "top_k_steps": [80, 70, 60],
+    "temperature_steps": [0.8, 0.7],
+}
+
+
+_QUALITY_CONSOLE = Console(stderr=True) if Console is not None else None
+
+
+def _quality_log(message: str) -> None:
+    if _QUALITY_CONSOLE is not None:
+        _QUALITY_CONSOLE.log(message)
+
+
+_DEFAULT_QUALITY_GUARD: QualityGuard | None = None
+
+
+def _ensure_quality_guard(candidate: QualityGuard | None = None) -> QualityGuard:
+    if candidate is not None:
+        return candidate
+
+    global _DEFAULT_QUALITY_GUARD
+    if _DEFAULT_QUALITY_GUARD is None:
+        _DEFAULT_QUALITY_GUARD = QualityGuard(
+            lm_scorer=LMScorer(prefer_transformers=False)
+        )
+    return _DEFAULT_QUALITY_GUARD
 
 
 _QUALITY_KEY_ALIASES = {
@@ -392,6 +448,120 @@ def _parse_spans_payload(payload: str) -> List[List[int]]:
     return spans
 
 
+def _prepare_gate_thresholds(overrides: Mapping[str, float] | None) -> Dict[str, float]:
+    thresholds = dict(DEFAULT_GATE_THRESHOLDS)
+    if not overrides:
+        return thresholds
+
+    for key, value in overrides.items():
+        if value is None:
+            continue
+        try:
+            thresholds[str(key)] = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"invalid threshold value for {key!s}: {value!r}"
+            ) from exc
+    return thresholds
+
+
+def _prepare_regen_strategy(strategy: Mapping[str, Any] | None) -> Dict[str, Any]:
+    merged = deepcopy(DEFAULT_REGEN_STRATEGY)
+    if strategy:
+        for key, value in strategy.items():
+            if value is None:
+                continue
+            merged[str(key)] = value
+
+    merged["seed_pool"] = list(merged.get("seed_pool", []))
+    merged["top_k_steps"] = list(merged.get("top_k_steps", []))
+    merged["temperature_steps"] = list(merged.get("temperature_steps", []))
+    return merged
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(float(value))
+
+
+def _coerce_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigurationError(f"invalid numeric value for regeneration strategy: {value!r}")
+
+
+def _iter_attempts(
+    seed_text: str,
+    regen_attempts: int,
+    strategy: Mapping[str, Any],
+) -> Iterable[_AttemptConfig]:
+    config = _prepare_regen_strategy(strategy)
+    total = max(regen_attempts, 0) + 1
+
+    seed_pool = deque(str(seed) for seed in config.get("seed_pool", []))
+    top_k_steps = deque(config.get("top_k_steps", []))
+    temperature_steps = deque(config.get("temperature_steps", []))
+
+    for index in range(total):
+        if index == 0:
+            candidate_seed = seed_text
+            seed_variant = "base"
+        else:
+            candidate_seed = seed_text
+            if seed_pool:
+                candidate_seed = str(seed_pool.popleft())
+            seed_variant = f"alt-{index}"
+
+        overrides: Dict[str, Any] = {}
+        if index > 0:
+            if top_k_steps:
+                overrides["top_k"] = _coerce_int(top_k_steps.popleft())
+            if temperature_steps:
+                overrides["temp"] = _coerce_float(temperature_steps.popleft())
+
+        yield _AttemptConfig(candidate_seed, overrides, seed_variant)
+
+
+def _generate_cover_once(
+    payload: bytes,
+    *,
+    seed_text: str,
+    quality: Mapping[str, Any],
+    chunk_bytes: int,
+    use_crc: bool,
+    ecc: str,
+    nsym: int,
+    lm: LMProvider,
+) -> str:
+    encode_result = stego_encode(
+        payload,
+        chunk_bytes=chunk_bytes,
+        use_crc=use_crc,
+        ecc=ecc,
+        nsym=nsym,
+        quality=quality,
+        seed_text=seed_text,
+        lm=lm,
+    )
+
+    spans = [list(map(int, span)) for span in encode_result]
+
+    try:
+        tokenizer = _resolve_tokenizer(lm)
+    except ConfigurationError:
+        tokenizer = None
+
+    if tokenizer is None:
+        raise ConfigurationError("language model tokenizer unavailable for cover rendering")
+
+    seed_ids = seed_to_ids(seed_text, tokenizer)
+    cover_text = spans_to_text(spans, seed_ids, tokenizer)
+    return cover_text
+
+
 def cover_generate(
     secret: bytes | str,
     *,
@@ -402,6 +572,11 @@ def cover_generate(
     ecc: str = "rs",
     nsym: int = 10,
     lm: LMProvider | None = None,
+    quality_gate: bool = True,
+    gate_thresholds: Mapping[str, float] | None = None,
+    regen_attempts: int = 2,
+    regen_strategy: Mapping[str, Any] | None = None,
+    quality_guard: QualityGuard | None = None,
 ) -> str:
     """Generate a natural-language cover string embedding *secret* information."""
 
@@ -409,31 +584,82 @@ def cover_generate(
     lm_provider = _ensure_cover_lm(lm)
 
     quality_args = _normalise_quality_dict(quality)
+    if not quality_gate:
+        return _generate_cover_once(
+            payload,
+            seed_text=seed_text,
+            quality=quality_args,
+            chunk_bytes=chunk_bytes,
+            use_crc=use_crc,
+            ecc=ecc,
+            nsym=nsym,
+            lm=lm_provider,
+        )
 
-    encode_result = stego_encode(
-        payload,
-        chunk_bytes=chunk_bytes,
-        use_crc=use_crc,
-        ecc=ecc,
-        nsym=nsym,
-        quality=quality_args,
-        seed_text=seed_text,
-        lm=lm_provider,
+    thresholds = _prepare_gate_thresholds(gate_thresholds)
+    guard = _ensure_quality_guard(quality_guard)
+    strategy = regen_strategy or {}
+
+    total_attempts = max(regen_attempts, 0) + 1
+    last_result: GuardResult | None = None
+    last_cover = ""
+
+    for attempt_index, attempt in enumerate(
+        _iter_attempts(seed_text, regen_attempts, strategy), start=1
+    ):
+        attempt_quality = dict(quality_args)
+        attempt_quality.update(attempt.overrides)
+
+        cover_text = _generate_cover_once(
+            payload,
+            seed_text=attempt.seed_text,
+            quality=attempt_quality,
+            chunk_bytes=chunk_bytes,
+            use_crc=use_crc,
+            ecc=ecc,
+            nsym=nsym,
+            lm=lm_provider,
+        )
+
+        last_cover = cover_text
+        guard_result = guard.evaluate(cover_text, thresholds)
+        last_result = guard_result
+
+        status = "PASS" if guard_result.passed else "REJECT"
+        ppl = guard_result.metrics.get("ppl")
+        ttr = guard_result.metrics.get("type_token_ratio")
+        metric_parts = []
+        if ppl is not None:
+            metric_parts.append(f"ppl={ppl:.2f}")
+        if ttr is not None:
+            metric_parts.append(f"ttr={ttr:.2f}")
+        adjustments = ", ".join(f"{key}={value}" for key, value in attempt.overrides.items())
+        adjustment_desc = adjustments if adjustments else "default"
+        metrics_desc = ", ".join(metric_parts) if metric_parts else "no-metrics"
+        _quality_log(
+            (
+                f"[cyan]quality attempt {attempt_index}/{total_attempts} ({attempt.seed_variant})[/cyan] "
+                f"{metrics_desc} → {status} ({adjustment_desc})"
+            )
+        )
+        if not guard_result.passed and guard_result.reasons:
+            for reason in guard_result.reasons:
+                _quality_log(f"[yellow]- {reason}[/yellow]")
+
+        if guard_result.passed:
+            return cover_text
+
+        if attempt_index >= total_attempts:
+            break
+
+    if last_result is None:
+        raise QualityGateError(last_cover, ["quality evaluation failed"], {})
+
+    raise QualityGateError(
+        last_cover,
+        list(last_result.reasons),
+        dict(last_result.metrics),
     )
-
-    spans = [list(map(int, span)) for span in encode_result]
-
-    try:
-        tokenizer = _resolve_tokenizer(lm_provider)
-    except ConfigurationError:
-        tokenizer = None
-
-    if tokenizer is None:
-        raise ConfigurationError("language model tokenizer unavailable for cover rendering")
-
-    seed_ids = seed_to_ids(seed_text, tokenizer)
-    cover_text = spans_to_text(spans, seed_ids, tokenizer)
-    return cover_text
 
 
 def cover_reveal(

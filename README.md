@@ -62,22 +62,27 @@ make smoke  # اجرای اسکریپت smoke (نسخه، doctor، pytest)
 ```
 
 ## آزمون دود پوششی (Cover Smoke)
-برای آزمایش سریع جریان cover می‌توانید اسکریپت جدید را اجرا کنید:
+برای آزمایش سریع جریان cover می‌توانید اسکریپت‌های دود زیر را اجرا کنید:
 
 ```bash
-bash scripts/cover_smoke.sh
+bash scripts/cover_smoke.sh          # دود کلاسیک بدون نگهبان کیفیت
+bash scripts/quality_smoke.sh        # دود همراه با gate و audit
+bash scripts/audit_many.sh           # تولید مجموعه‌ای از کاورها و ممیزی گروهی
 ```
 
-این اسکریپت یک پیام محرمانهٔ نمونه می‌سازد، آن را با رمز عبور در یک متن پوششی جاسازی می‌کند و سه خط اول خروجی را نمایش می‌دهد. در صورت نیاز به بازیابی دستی، می‌توانید از دستورات زیر (با به‌روزرسانی مسیرها و seed) استفاده کنید:
+این اسکریپت‌ها پیام‌های محرمانهٔ نمونه می‌سازند، آن‌ها را در متون پوششی جاسازی می‌کنند و نتیجهٔ نگهبان کیفیت و ممیزی را گزارش می‌دهند. در صورت نیاز به اجرای دستی، می‌توانید از دستورات زیر (با به‌روزرسانی مسیرها و seed) استفاده کنید:
 
 ```bash
 neuralstego cover-generate -p "Pa$$w0rd" -i secret.txt -o cover.txt \
   --seed "در یک گفت‌وگوی کوتاه درباره‌ی فناوری و اخبار روز صحبت می‌کنیم." \
   --quality top-k 60 --quality temperature 0.8 \
-  --chunk-bytes 256 --crc on --ecc rs --nsym 10
+  --quality-gate on --max-ppl 100 --max-ngram-repeat 0.25 --min-ttr 0.30 \
+  --regen-attempts 2 --chunk-bytes 256 --crc on --ecc rs --nsym 10
 
 neuralstego cover-reveal -p "Pa$$w0rd" -i cover.txt -o recovered.txt \
   --seed "در یک گفت‌وگوی کوتاه درباره‌ی فناوری و اخبار روز صحبت می‌کنیم."
+
+neuralstego quality-audit -i cover.txt --max-ppl 100 --max-ngram-repeat 0.25 --min-ttr 0.30
 ```
 
 ## ساختار معماری و فازها
