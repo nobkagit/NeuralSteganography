@@ -405,12 +405,15 @@ def _rank_tokens(dist: ProbDist) -> Tuple[List[int], int]:
 
 def _dist_to_arrays(dist: ProbDist) -> Tuple[NDArray[np.int_], NDArray[np.float64]]:
     if isinstance(dist, np.ndarray):
-        tokens = np.arange(dist.size, dtype=np.int64)
+        tokens = cast(NDArray[np.int_], np.arange(dist.size, dtype=np.int64))
         probs = np.asarray(dist, dtype=np.float64)
         return tokens, probs
     if isinstance(dist, dict):
         items = sorted(dist.items())
-        tokens = np.array([int(token) for token, _ in items], dtype=np.int64)
+        tokens = cast(
+            NDArray[np.int_],
+            np.array([int(token) for token, _ in items], dtype=np.int64),
+        )
         probs = np.array([float(prob) for _, prob in items], dtype=np.float64)
         return tokens, probs
     raise TypeError(f"Unsupported probability distribution type: {type(dist)!r}")

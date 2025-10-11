@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -145,10 +145,13 @@ def cap_bits_per_token(dist: ProbDist, cap_per_token_bits: int) -> ProbDist:
 def _dist_to_arrays(dist: ProbDist) -> tuple[NDArray[np.int_], NDArray[np.float64]]:
     if isinstance(dist, np.ndarray):
         probs = np.asarray(dist, dtype=np.float64)
-        tokens = np.arange(probs.size, dtype=np.int64)
+        tokens = cast(NDArray[np.int_], np.arange(probs.size, dtype=np.int64))
     elif isinstance(dist, dict):
         items = sorted(dist.items())
-        tokens = np.array([int(token) for token, _ in items], dtype=np.int64)
+        tokens = cast(
+            NDArray[np.int_],
+            np.array([int(token) for token, _ in items], dtype=np.int64),
+        )
         probs = np.array([float(prob) for _, prob in items], dtype=np.float64)
     else:
         raise TypeError(f"Unsupported distribution type: {type(dist)!r}")

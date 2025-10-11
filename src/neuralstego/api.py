@@ -22,9 +22,9 @@ from typing import (
 )
 
 try:  # pragma: no cover - optional dependency for pretty logging
-    from rich.console import Console  # type: ignore[import-not-found]
+    from rich.console import Console as _RichConsole  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - graceful fallback when rich is absent
-    Console = None
+    _RichConsole = None
 
 from .codec import assemble_bytes, build_packet, chunk_bytes, make_msg_id, parse_packet
 from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
@@ -107,7 +107,17 @@ DEFAULT_REGEN_STRATEGY: Dict[str, Any] = {
 }
 
 
-_QUALITY_CONSOLE = Console(stderr=True) if Console is not None else None
+class _ConsoleLogger(Protocol):
+    def log(self, message: str, *args: object, **kwargs: object) -> None:
+        ...
+
+
+if _RichConsole is not None:
+    _QUALITY_CONSOLE: _ConsoleLogger | None = cast(
+        _ConsoleLogger, _RichConsole(stderr=True)
+    )
+else:
+    _QUALITY_CONSOLE = None
 
 
 def _quality_log(message: str) -> None:

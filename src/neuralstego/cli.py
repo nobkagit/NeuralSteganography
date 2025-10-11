@@ -9,17 +9,12 @@ import hashlib
 import json
 from pathlib import Path
 import sys
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple, cast
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Protocol, Sequence, Tuple, cast
 
 try:  # pragma: no cover - optional dependency
-    from rich.console import Console  # type: ignore[import-not-found]
+    from rich.console import Console as _RichConsole  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - fallback when rich is unavailable
-    class _ConsoleFallback:
-        def print(self, *objects: object, **_: object) -> None:
-            text = " ".join(str(obj) for obj in objects)
-            print(text)
-
-    Console = _ConsoleFallback  # type: ignore[misc]
+    _RichConsole = None
 
 from .api import (
     DEFAULT_GATE_THRESHOLDS,
@@ -40,7 +35,20 @@ from .exceptions import (
 from .detect.guard import QualityGuard
 from .metrics import LMScorer
 
-console = Console()
+class _ConsolePrinter(Protocol):
+    def print(self, *objects: object, **kwargs: object) -> None:
+        ...
+
+
+if _RichConsole is None:
+    class _ConsoleFallback:
+        def print(self, *objects: object, **_: object) -> None:
+            text = " ".join(str(obj) for obj in objects)
+            print(text)
+
+    console: _ConsolePrinter = _ConsoleFallback()
+else:
+    console = cast(_ConsolePrinter, _RichConsole())
 
 
 QUALITY_GUARD = QualityGuard(lm_scorer=LMScorer(prefer_transformers=False))

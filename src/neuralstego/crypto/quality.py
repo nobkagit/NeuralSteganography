@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -93,11 +94,14 @@ def apply_quality(
 def _dist_to_arrays(dist: ProbDist) -> tuple[NDArray[np.int_], NDArray[np.float64]]:
     if isinstance(dist, np.ndarray):
         probs = np.asarray(dist, dtype=np.float64)
-        tokens = np.arange(probs.size, dtype=np.int64)
+        tokens = cast(NDArray[np.int_], np.arange(probs.size, dtype=np.int64))
         return tokens, probs
     if isinstance(dist, dict):
         items = sorted(dist.items())
-        tokens = np.array([int(token) for token, _ in items], dtype=np.int64)
+        tokens = cast(
+            NDArray[np.int_],
+            np.array([int(token) for token, _ in items], dtype=np.int64),
+        )
         probs = np.array([float(prob) for _, prob in items], dtype=np.float64)
         return tokens, probs
     raise TypeError(f"Unsupported distribution type: {type(dist)!r}")
