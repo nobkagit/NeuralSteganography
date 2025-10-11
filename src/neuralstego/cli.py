@@ -675,6 +675,217 @@ def _handle_cover_reveal(argv: Sequence[str]) -> int:
     return 0
 
 
+def _handle_cover_walkthrough(argv: Sequence[str]) -> int:
+    """Interactively demonstrate cover generation and recovery for a secret message."""
+
+    parser = argparse.ArgumentParser(
+        prog="neuralstego cover-walkthrough",
+        description=(
+            "Generate a cover from a secret message and immediately decode it while"
+            " printing each step."
+        ),
+    )
+    parser.add_argument("--message", help="Secret message provided as a UTF-8 literal string")
+    parser.add_argument(
+        "-i",
+        "--input",
+        dest="input_path",
+        default=None,
+        help="Path to a file containing the secret message (use '-' for stdin)",
+    )
+    parser.add_argument(
+        "--encoding",
+        default="utf-8",
+        help="Encoding used to display secrets loaded from files (use 'none' to disable)",
+    )
+    parser.add_argument("--seed-text", default="", help="Seed text supplied to the language model")
+    parser.add_argument("--chunk-bytes", type=int, default=256, help="Bytes per chunk for framing")
+    parser.add_argument("--crc", choices=["on", "off"], default="on", help="Enable or disable CRC32")
+    parser.add_argument(
+        "--ecc",
+        choices=["auto", "none", "rs"],
+        default="rs",
+        help="Error correction coding mode",
+    )
+    parser.add_argument("--nsym", type=int, default=10, help="Reed-Solomon parity symbols")
+    parser.add_argument("--quality-gate", choices=["on", "off"], default="on", help="Enable the quality gate")
+    parser.add_argument("--max-ppl", type=float, help="Maximum acceptable perplexity")
+    parser.add_argument(
+        "--max-detector-score",
+        type=float,
+        help="Maximum detector score allowed when a classifier is configured",
+    )
+    parser.add_argument("--max-ngram-repeat", type=float, help="Maximum n-gram repetition ratio")
+    parser.add_argument("--min-ttr", type=float, help="Minimum type-token ratio")
+    parser.add_argument(
+        "--regen-attempts",
+        type=int,
+        default=2,
+        help="Number of regeneration attempts when the gate rejects a cover",
+    )
+    parser.add_argument(
+        "--regen-seed-pool",
+        help="File containing alternate seed candidates (one per line) used during regeneration",
+    )
+    parser.add_argument(
+        "--quality",
+        action="append",
+        nargs=2,
+        metavar=("KEY", "VALUE"),
+        help="Quality parameter override as key/value pairs",
+    )
+
+    args, remaining = parser.parse_known_args(list(argv))
+    try:
+        prefixed_quality, leftover = _quality_from_prefixed(remaining, "--quality.")
+    except ValueError as exc:
+        parser.error(str(exc))
+    if leftover:
+        parser.error(f"unrecognized arguments: {' '.join(leftover)}")
+
+    if args.message is not None and args.input_path is not None:
+        parser.error("Provide either --message or --input, not both")
+    if args.message is None and args.input_path is None:
+        parser.error("Provide a secret message with --message or --input")
+
+    quality = _quality_from_pairs(args.quality)
+    quality.update(prefixed_quality)
+
+    secret_bytes: bytes
+    display_text: str
+    display_kind: str
+    display_encoding: str | None
+
+    if args.message is not None:
+        secret_bytes = args.message.encode("utf-8")
+        display_text = args.message
+        display_kind = "text"
+        display_encoding = "utf-8"
+        display_label = "UTF-8 literal input"
+    else:
+        secret_bytes = _read_bytes(args.input_path)
+        encoding = args.encoding
+        if encoding.lower() == "none":
+            display_text = secret_bytes.hex()
+            display_kind = "hex"
+            display_encoding = None
+            display_label = "hexadecimal (encoding disabled)"
+        else:
+            display_encoding = encoding
+            try:
+                display_text = secret_bytes.decode(encoding)
+                display_kind = "text"
+                display_label = f"decoded as {encoding}"
+            except UnicodeDecodeError:
+                display_text = base64.b64encode(secret_bytes).decode("ascii")
+                display_kind = "base64"
+                display_label = f"base64 (failed to decode as {encoding})"
+
+    console.print("مرحله ۱: خواندن پیام محرمانه")
+    console.print(f"- فرمت نمایش: {display_label}")
+    console.print(f"- طول پیام: {len(secret_bytes)} بایت")
+    console.print(display_text if display_text else "(پیام خالی)")
+
+    ecc_mode, degraded = _resolve_ecc(args.ecc)
+    if degraded:
+        console.print("[yellow]Reed-Solomon ECC is unavailable. Continuing without ECC.[/yellow]")
+
+    gate_enabled = args.quality_gate == "on"
+    thresholds = _gate_thresholds_from_namespace(args)
+    regen_strategy: Dict[str, Any] | None = None
+    seed_pool_override = _load_seed_pool_file(args.regen_seed_pool)
+    if seed_pool_override:
+        regen_strategy = {"seed_pool": seed_pool_override}
+
+    if gate_enabled:
+        _warn_if_detector_threshold(thresholds)
+
+    exit_status = 0
+    gate_error: QualityGateError | None = None
+
+    try:
+        cover_text = api_cover_generate(
+            secret_bytes,
+            seed_text=args.seed_text,
+            quality=quality,
+            chunk_bytes=args.chunk_bytes,
+            use_crc=args.crc == "on",
+            ecc=ecc_mode,
+            nsym=args.nsym,
+            quality_gate=gate_enabled,
+            gate_thresholds=thresholds if gate_enabled else None,
+            regen_attempts=args.regen_attempts,
+            regen_strategy=regen_strategy,
+            quality_guard=QUALITY_GUARD,
+        )
+    except QualityGateError as exc:
+        cover_text = exc.cover_text
+        gate_error = exc
+        exit_status = 1
+    except (ConfigurationError, NeuralStegoError, RuntimeError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        return 1
+
+    console.print("\nمرحله ۲: تولید متن کاور")
+    console.print(f"- طول کاور: {len(cover_text)} نویسه")
+    console.print(cover_text if cover_text else "(کاور خالی)")
+
+    if gate_error is not None:
+        console.print("[red]Quality gate rejected the generated cover.[/red]")
+        if gate_error.metrics:
+            console.print("شاخص‌های کیفیت:")
+            for key, value in sorted(gate_error.metrics.items()):
+                if isinstance(value, float):
+                    display_value = f"{value:.3f}"
+                else:
+                    display_value = str(value)
+                console.print(f"  {key}: {display_value}")
+        if gate_error.reasons:
+            console.print("دلایل:")
+            for reason in gate_error.reasons:
+                console.print(f"  - {reason}")
+        console.print("[yellow]Continuing with the rejected cover for demonstration purposes.[/yellow]")
+
+    try:
+        recovered_bytes = api_cover_reveal(
+            cover_text,
+            seed_text=args.seed_text,
+            quality=quality if quality else None,
+            use_crc=args.crc == "on",
+            ecc=ecc_mode,
+            nsym=args.nsym,
+        )
+    except (ConfigurationError, MissingChunksError, NeuralStegoError, RuntimeError) as exc:
+        console.print(f"[red]Error during reveal:[/red] {exc}")
+        return 1
+
+    if display_kind == "text":
+        assert display_encoding is not None
+        try:
+            recovered_text = recovered_bytes.decode(display_encoding)
+        except UnicodeDecodeError:
+            recovered_text = base64.b64encode(recovered_bytes).decode("ascii")
+            console.print(
+                f"[yellow]Failed to decode recovered secret with {display_encoding}; showing base64 instead.[/yellow]"
+            )
+            display_kind = "base64"
+    elif display_kind == "hex":
+        recovered_text = recovered_bytes.hex()
+    else:
+        recovered_text = base64.b64encode(recovered_bytes).decode("ascii")
+
+    console.print("\nمرحله ۳: بازیابی پیام")
+    console.print(recovered_text if recovered_text else "(پیام خالی)")
+
+    if recovered_bytes == secret_bytes:
+        console.print("[green]نتیجه: پیام بازیابی شده با ورودی یکسان است.[/green]")
+    else:
+        console.print("[red]نتیجه: پیام بازیابی شده با ورودی تفاوت دارد.[/red]")
+        exit_status = 1
+
+    return exit_status
+
+
 def _handle_quality_audit(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="neuralstego quality-audit",
@@ -870,6 +1081,7 @@ def build_parser() -> argparse.ArgumentParser:
         "decode",
         "cover-generate",
         "cover-reveal",
+        "cover-walkthrough",
         "quality-audit",
         "codec-encode",
         "codec-decode",
@@ -898,6 +1110,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         return _handle_cover_generate(rest)
     if command == "cover-reveal":
         return _handle_cover_reveal(rest)
+    if command == "cover-walkthrough":
+        return _handle_cover_walkthrough(rest)
     if command == "quality-audit":
         return _handle_quality_audit(rest)
     if command == "codec-encode":
