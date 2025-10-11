@@ -68,6 +68,7 @@ make smoke  # اجرای اسکریپت smoke (نسخه، doctor، pytest)
 bash scripts/cover_smoke.sh          # دود کلاسیک بدون نگهبان کیفیت
 bash scripts/quality_smoke.sh        # دود همراه با gate و audit
 bash scripts/audit_many.sh           # تولید مجموعه‌ای از کاورها و ممیزی گروهی
+bash scripts/ui_smoke.sh             # اطمینان از بالا آمدن رابط Gradio
 ```
 
 این اسکریپت‌ها پیام‌های محرمانهٔ نمونه می‌سازند، آن‌ها را در متون پوششی جاسازی می‌کنند و نتیجهٔ نگهبان کیفیت و ممیزی را گزارش می‌دهند. در صورت نیاز به اجرای دستی، می‌توانید از دستورات زیر (با به‌روزرسانی مسیرها و seed) استفاده کنید:
@@ -84,6 +85,17 @@ neuralstego cover-reveal -p "Pa$$w0rd" -i cover.txt -o recovered.txt \
 
 neuralstego quality-audit -i cover.txt --max-ppl 100 --max-ngram-repeat 0.25 --min-ttr 0.30
 ```
+
+## رابط کاربری وب Gradio
+برای کاربرانی که رابط تعاملی ترجیح می‌دهند، ماژول Gradio در دسترس است. پیش از اجرا اطمینان حاصل کنید که وابستگی‌ها (به‌ویژه `gradio>=4.0.0`) نصب شده‌اند.
+
+```bash
+neuralstego ui --port 7860 --share false
+# یا
+bash scripts/run_gradio.sh
+```
+
+گزینهٔ `--device` و متغیر محیطی `NEURALSTEGO_DEVICE` اجازه می‌دهند بین `auto`، `cpu` یا `cuda` انتخاب کنید. اگر نیاز به بررسی سریع بالا آمدن سرویس دارید، اسکریپت `bash scripts/ui_smoke.sh` سرور را برای چند ثانیه اجرا کرده و پیام موفقیت چاپ می‌کند.
 
 ## ساختار معماری و فازها
 - **فاز ۰: اسکلت پروژه** — تنظیم ساختار پوشه‌ها، ابزارهای توسعه، راهنمای عامل‌ها.
