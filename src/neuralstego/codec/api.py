@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .arithmetic import decode_bits, encode_bits
 from .types import LMProvider
 
 

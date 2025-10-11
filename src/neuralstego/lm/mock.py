@@ -1,4 +1,5 @@
-"""Mock language model for testing the steganography pipeline."""
+"""Deterministic language model stub for tests."""
+
 from __future__ import annotations
 
 from typing import Dict, Iterable, List
@@ -44,6 +45,7 @@ class MockLM:
     def encode_arithmetic(
         self, bits: List[int], context: List[int], *, quality: Dict[str, float]
     ) -> List[int]:
+        _ = context, quality
         if not bits:
             return []
         payload = _bits_to_bytes(bits)
@@ -52,6 +54,7 @@ class MockLM:
     def decode_arithmetic(
         self, tokens: List[int], context: List[int], *, quality: Dict[str, float]
     ) -> List[int]:
+        _ = context, quality
         payload = bytes(int(t) % 256 for t in tokens)
         return _bytes_to_bits(payload)
 

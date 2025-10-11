@@ -847,9 +847,10 @@ def encode_text(
     chunk_entries: List[Dict[str, Any]] = []
 
     adapter_states: List[CodecState] = []
-    if isinstance(lm_adapter, _CodecLMAdapter):
-        adapter_states = lm_adapter.drain_states()
-        if len(adapter_states) != len(spans):
+    state_drain = getattr(lm_adapter, "drain_states", None)
+    if callable(state_drain):
+        adapter_states = list(state_drain())
+        if adapter_states and len(adapter_states) != len(spans):
             raise ConfigurationError("language model state mismatch during encoding")
 
     for index, tokens in enumerate(spans):
@@ -992,10 +993,11 @@ def decode_text(
     lm_adapter = _ensure_lm(lm)
     quality_args = _normalise_quality_dict(quality)
 
-    if isinstance(lm_adapter, _CodecLMAdapter):
+    state_loader = getattr(lm_adapter, "load_states", None)
+    if callable(state_loader):
         if any(state is None for state in state_payloads):
             raise ConfigurationError("codec language model state missing from payload")
-        lm_adapter.load_states([cast(CodecState, state) for state in state_payloads])
+        state_loader([cast(CodecState, state) for state in state_payloads])
 
     result = stego_decode(
         spans,
