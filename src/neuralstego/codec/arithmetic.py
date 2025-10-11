@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Iterable, List, Mapping, MutableMapping, Sequence, Tuple
+from typing import Iterable, List, Mapping, Sequence, Tuple, cast
 
 import math
 import numpy as np
+from numpy.typing import NDArray
 
 from .errors import ArithmeticRangeError, DecodeDivergenceError
 from .quality import apply_quality, cap_bits_per_token
@@ -125,7 +126,7 @@ def encode_with_lm(
     *,
     context: Sequence[int] | None = None,
     quality: Mapping[str, object] | None = None,
-    state: MutableMapping[str, object] | None = None,
+    state: CodecState | None = None,
     max_context: int | None = None,
 ) -> list[int]:
     """Encode a payload using probability distributions from ``lm``."""
@@ -175,7 +176,7 @@ def decode_with_lm(
     *,
     context: Sequence[int] | None = None,
     quality: Mapping[str, object] | None = None,
-    state: MutableMapping[str, object] | None = None,
+    state: CodecState | None = None,
     max_context: int | None = None,
 ) -> bytes:
     """Decode tokens produced by :func:`encode_with_lm`."""
@@ -186,7 +187,7 @@ def decode_with_lm(
     history: Sequence[int] | None = None
     total_bits: int | None = None
     if state is not None:
-        history = state.get("history")  # type: ignore[assignment]
+        history = cast(Sequence[int] | None, state.get("history"))
         residual = state.get("residual_bits")
         if residual:
             total_bits = int.from_bytes(residual, byteorder="big", signed=False)
@@ -284,7 +285,7 @@ def decode_bits(
     history: Sequence[int] | None = None
     total_bits: int | None = None
     if state is not None:
-        history = state.get("history")
+        history = cast(Sequence[int] | None, state.get("history"))
         residual = state.get("residual_bits")
         if residual:
             total_bits = int.from_bytes(residual, byteorder="big", signed=False)
@@ -354,17 +355,34 @@ def _apply_quality(dist: ProbDist, quality: Mapping[str, object] | None) -> Prob
 
     filtered = dist
     if isinstance(quality, Mapping):
-        top_k = quality.get("top_k")
-        top_p = quality.get("top_p")
-        min_prob = quality.get("min_prob")
+        top_k = _coerce_optional_int(quality.get("top_k"), "top_k")
+        top_p = _coerce_optional_float(quality.get("top_p"), "top_p")
+        min_prob = _coerce_optional_float(quality.get("min_prob"), "min_prob")
         if any(param is not None for param in (top_k, top_p, min_prob)):
             filtered = apply_quality(filtered, top_k=top_k, top_p=top_p, min_prob=min_prob)
 
-        cap_bits = quality.get("cap_per_token_bits")
+        cap_bits_raw = quality.get("cap_per_token_bits")
+        cap_bits = _coerce_optional_int(cap_bits_raw, "cap_per_token_bits")
         if cap_bits is not None:
-            filtered = cap_bits_per_token(filtered, int(cap_bits))
+            filtered = cap_bits_per_token(filtered, cap_bits)
 
     return filtered
+
+
+def _coerce_optional_int(value: object | None, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer when provided")
+    return value
+
+
+def _coerce_optional_float(value: object | None, name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a real number when provided")
+    return float(value)
 
 
 def _rank_tokens(dist: ProbDist) -> Tuple[List[int], int]:
@@ -385,10 +403,10 @@ def _rank_tokens(dist: ProbDist) -> Tuple[List[int], int]:
     return sorted_tokens[:limit].tolist(), capacity
 
 
-def _dist_to_arrays(dist: ProbDist) -> Tuple[np.ndarray, np.ndarray]:
+def _dist_to_arrays(dist: ProbDist) -> Tuple[NDArray[np.int_], NDArray[np.float64]]:
     if isinstance(dist, np.ndarray):
         tokens = np.arange(dist.size, dtype=np.int64)
-        probs = dist.astype(np.float64, copy=True)
+        probs = np.asarray(dist, dtype=np.float64)
         return tokens, probs
     if isinstance(dist, dict):
         items = sorted(dist.items())

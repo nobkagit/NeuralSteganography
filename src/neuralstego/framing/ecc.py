@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import importlib
+from types import ModuleType
 from typing import Tuple
 
 from .errors import NotAvailableError
 
-try:  # pragma: no cover - import guard
-    import reedsolo
-except ModuleNotFoundError:  # pragma: no cover - handled at runtime
-    reedsolo = None
+
+def _load_reedsolo() -> ModuleType | None:
+    try:
+        return importlib.import_module("reedsolo")
+    except ModuleNotFoundError:  # pragma: no cover - handled at runtime
+        return None
 
 
-def _require_reedsolo() -> "reedsolo":
+reedsolo = _load_reedsolo()
+
+
+def _require_reedsolo() -> ModuleType:
     if reedsolo is None:
         raise NotAvailableError(
             "reedsolo is not installed. Install the 'reedsolo' package to enable ECC support."

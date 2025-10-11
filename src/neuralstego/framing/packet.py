@@ -6,7 +6,7 @@ import base64
 import json
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from .errors import PacketValidationError, PacketVersionError
 
@@ -29,7 +29,7 @@ class ECCCfg:
         return data
 
     @classmethod
-    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ECCCfg":
+    def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "ECCCfg":
         if not data:
             return cls()
         if not isinstance(data, dict):
@@ -67,8 +67,10 @@ class PacketCfg:
         return cfg
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PacketCfg":
-        if not isinstance(data, dict):
+    def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "PacketCfg":
+        if data is None:
+            data = {}
+        if not isinstance(data, Mapping):
             raise PacketValidationError("'cfg' must be an object")
         crc = data.get("crc", "none")
         ecc = ECCCfg.from_dict(data.get("ecc"))
