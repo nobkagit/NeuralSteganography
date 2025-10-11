@@ -44,6 +44,10 @@ console = Console()
 QUALITY_GUARD = QualityGuard(lm_scorer=LMScorer(prefer_transformers=False))
 
 
+SAMPLE_SECRET_TEXT = "سلام! این یک پیام محرمانهٔ نمونه است."
+SAMPLE_SEED_TEXT = "در مورد یک گفت‌وگوی روزمره و خبرهای فناوری صحبت می‌کنیم."
+
+
 def _get_crypto_api():
     try:
         from .crypto import api as crypto_api
@@ -698,6 +702,11 @@ def _handle_cover_walkthrough(argv: Sequence[str]) -> int:
         default="utf-8",
         help="Encoding used to display secrets loaded from files (use 'none' to disable)",
     )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Use a built-in demo secret and seed so the command can be run without extra files",
+    )
     parser.add_argument("--seed-text", default="", help="Seed text supplied to the language model")
     parser.add_argument("--chunk-bytes", type=int, default=256, help="Bytes per chunk for framing")
     parser.add_argument("--crc", choices=["on", "off"], default="on", help="Enable or disable CRC32")
@@ -743,10 +752,14 @@ def _handle_cover_walkthrough(argv: Sequence[str]) -> int:
     if leftover:
         parser.error(f"unrecognized arguments: {' '.join(leftover)}")
 
-    if args.message is not None and args.input_path is not None:
-        parser.error("Provide either --message or --input, not both")
-    if args.message is None and args.input_path is None:
-        parser.error("Provide a secret message with --message or --input")
+    if args.sample:
+        if args.message is not None or args.input_path is not None:
+            parser.error("--sample cannot be combined with --message or --input")
+    else:
+        if args.message is not None and args.input_path is not None:
+            parser.error("Provide either --message or --input, not both")
+        if args.message is None and args.input_path is None:
+            parser.error("Provide a secret message with --message or --input or pass --sample")
 
     quality = _quality_from_pairs(args.quality)
     quality.update(prefixed_quality)
@@ -756,7 +769,18 @@ def _handle_cover_walkthrough(argv: Sequence[str]) -> int:
     display_kind: str
     display_encoding: str | None
 
-    if args.message is not None:
+    seed_text = args.seed_text
+    demo_mode = args.sample
+    if demo_mode and not seed_text:
+        seed_text = SAMPLE_SEED_TEXT
+
+    if demo_mode:
+        secret_bytes = SAMPLE_SECRET_TEXT.encode("utf-8")
+        display_text = SAMPLE_SECRET_TEXT
+        display_kind = "text"
+        display_encoding = "utf-8"
+        display_label = "نمونهٔ داخلی (UTF-8)"
+    elif args.message is not None:
         secret_bytes = args.message.encode("utf-8")
         display_text = args.message
         display_kind = "text"
@@ -782,6 +806,8 @@ def _handle_cover_walkthrough(argv: Sequence[str]) -> int:
                 display_label = f"base64 (failed to decode as {encoding})"
 
     console.print("مرحله ۱: خواندن پیام محرمانه")
+    if demo_mode:
+        console.print("- حالت: اجرای نمونهٔ آمادهٔ درون‌ساخت")
     console.print(f"- فرمت نمایش: {display_label}")
     console.print(f"- طول پیام: {len(secret_bytes)} بایت")
     console.print(display_text if display_text else "(پیام خالی)")
@@ -806,7 +832,7 @@ def _handle_cover_walkthrough(argv: Sequence[str]) -> int:
     try:
         cover_text = api_cover_generate(
             secret_bytes,
-            seed_text=args.seed_text,
+            seed_text=seed_text,
             quality=quality,
             chunk_bytes=args.chunk_bytes,
             use_crc=args.crc == "on",
@@ -849,7 +875,7 @@ def _handle_cover_walkthrough(argv: Sequence[str]) -> int:
     try:
         recovered_bytes = api_cover_reveal(
             cover_text,
-            seed_text=args.seed_text,
+            seed_text=seed_text,
             quality=quality if quality else None,
             use_crc=args.crc == "on",
             ecc=ecc_mode,

@@ -104,3 +104,31 @@ def test_cover_walkthrough_reports_gate_failure(monkeypatch, capsys):
     assert "Continuing with the rejected cover" in captured.out
     assert revealed["cover_text"] == "کاور رد شده"
     assert revealed["kwargs"]["quality"] is None
+
+
+def test_cover_walkthrough_sample_demo(monkeypatch, capsys):
+    calls: Dict[str, Any] = {}
+
+    def fake_cover_generate(secret: bytes, *, seed_text: str, **kwargs: Any) -> str:
+        calls["secret"] = secret
+        calls["seed_text"] = seed_text
+        return "نمونهٔ کاور"
+
+    def fake_cover_reveal(cover_text: str, *, seed_text: str, **kwargs: Any) -> bytes:
+        calls["cover_text"] = cover_text
+        calls["reveal_seed"] = seed_text
+        return cli_module.SAMPLE_SECRET_TEXT.encode("utf-8")
+
+    monkeypatch.setattr(cli_module, "api_cover_generate", fake_cover_generate)
+    monkeypatch.setattr(cli_module, "api_cover_reveal", fake_cover_reveal)
+
+    exit_code = _run_cli("cover-walkthrough", "--sample")
+
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.out
+    assert "نمونهٔ آماده" in captured.out
+
+    assert calls["secret"] == cli_module.SAMPLE_SECRET_TEXT.encode("utf-8")
+    assert calls["seed_text"] == cli_module.SAMPLE_SEED_TEXT
+    assert calls["cover_text"] == "نمونهٔ کاور"
+    assert calls["reveal_seed"] == cli_module.SAMPLE_SEED_TEXT
