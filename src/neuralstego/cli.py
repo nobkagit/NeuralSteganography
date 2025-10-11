@@ -59,6 +59,17 @@ def _fallback_warning(exc: ModuleNotFoundError) -> None:
     )
 
 
+def _parse_bool(value: str) -> bool:
+    value_lower = value.lower()
+    if value_lower in {"1", "true", "yes", "on"}:
+        return True
+    if value_lower in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        "boolean flag must be one of true/false/yes/no/on/off/1/0"
+    )
+
+
 def _derive_fallback_key(password: str, extra: bytes = b"") -> bytes:
     hasher = hashlib.sha256()
     hasher.update(password.encode("utf-8"))
@@ -857,6 +868,38 @@ def _handle_codec_decode(argv: Sequence[str]) -> int:
     return 0
 
 
+def _handle_ui(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="neuralstego ui",
+        description="Launch the interactive Gradio UI.",
+    )
+    parser.add_argument("--port", type=int, default=7860, help="Port for the Gradio server (default: 7860)")
+    parser.add_argument(
+        "--share",
+        type=_parse_bool,
+        default=False,
+        help="Enable a public gradio.live tunnel (true/false)",
+    )
+    parser.add_argument("--server-name", help="Hostname or IP address to bind the server")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], help="Preferred device for the language model")
+    args = parser.parse_args(list(argv))
+
+    try:
+        from neuralstego.app.gradio_app import launch as launch_gradio
+    except ModuleNotFoundError:
+        console.print(
+            "[red]Error:[/red] gradio dependency is missing. Install it with 'pip install -e .[dev]' or 'pip install gradio'."
+        )
+        return 1
+
+    try:
+        launch_gradio(port=args.port, share=args.share, server_name=args.server_name, device=args.device)
+    except Exception as exc:  # pragma: no cover - interactive runtime surface
+        console.print(f"[red]Error:[/red] failed to launch UI: {exc}")
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="neuralstego",
@@ -873,6 +916,7 @@ def build_parser() -> argparse.ArgumentParser:
         "quality-audit",
         "codec-encode",
         "codec-decode",
+        "ui",
     ]:
         subparsers.add_parser(command)
     return parser
@@ -904,6 +948,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         return _handle_codec_encode(rest)
     if command == "codec-decode":
         return _handle_codec_decode(rest)
+    if command == "ui":
+        return _handle_ui(rest)
 
     console.print(f"[red]Error:[/red] unknown command '{command}'")
     build_parser().print_help()
