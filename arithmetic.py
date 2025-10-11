@@ -12,8 +12,10 @@ from utils import bits2int, entropy, int2bits, is_sent_finish, kl, limit_past, n
 def _prepare_past_for_model(past):
     if past is None:
         return None
-    if isinstance(past, list):
-        return tuple(past)
+    if isinstance(past, DynamicCache):
+        return past
+    if isinstance(past, (list, tuple)):
+        return DynamicCache.from_legacy_cache(tuple(past))
     return past
 
 

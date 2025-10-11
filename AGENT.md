@@ -9,6 +9,7 @@
 - **Crypto Agent:** طراحی و بازبینی طرح‌های رمزنگاری (AES/AEAD)، مدیریت کلید و سیاست امنیت.
 - **Algorithm Agent:** مسئول رمزگذاری حسابی، APIهای encode/decode و کنترل پارامترهای کیفیت/ظرفیت.
 - **CLI/DevOps Agent:** توسعه CLI، اسکریپت‌ها، Makefile، pre-commit و گردش‌کار CI/CD.
+- **Quality Agent:** مالک سنجه‌ها، نگهبان کشف، و هماهنگ‌کنندهٔ آستانه‌های gate/audit.
 
 ## Style Guide
 - استفادهٔ اجباری از typing و docstring‌های دقیق.

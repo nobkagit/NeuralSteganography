@@ -8,7 +8,16 @@ def test_cover_generate_returns_text_with_mock_lm():
     lm = MockLM()
     secret = "راز مخفی"
     seed = "این یک متن پایه است"
-    cover_text = cover_generate(secret, seed_text=seed, quality={}, use_crc=False, ecc="none", nsym=0, lm=lm)
+    cover_text = cover_generate(
+        secret,
+        seed_text=seed,
+        quality={},
+        use_crc=False,
+        ecc="none",
+        nsym=0,
+        lm=lm,
+        quality_gate=False,
+    )
     assert isinstance(cover_text, str)
     assert cover_text
 

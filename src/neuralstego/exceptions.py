@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List
 
 
 class NeuralStegoError(Exception):
@@ -35,6 +35,21 @@ class MissingChunksError(FramingError):
         return f"Missing chunks at indices: {indices}"
 
 
+@dataclass
+class QualityGateError(NeuralStegoError):
+    """Raised when the quality gate rejects all cover-generation attempts."""
+
+    cover_text: str
+    reasons: List[str]
+    metrics: Dict[str, float]
+
+    def __str__(self) -> str:  # pragma: no cover - human-friendly message
+        if not self.reasons:
+            return "quality gate rejected the generated cover"
+        joined = "; ".join(self.reasons)
+        return f"quality gate rejected the generated cover: {joined}"
+
+
 __all__ = [
     "ConfigurationError",
     "FramingError",
@@ -42,4 +57,5 @@ __all__ = [
     "NeuralStegoError",
     "PacketCRCError",
     "PacketECCError",
+    "QualityGateError",
 ]
