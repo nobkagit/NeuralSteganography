@@ -15,7 +15,10 @@ class ArithmeticLM:
     def __init__(self, model, tokenizer, *, device: Optional[str] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
-        self.device = device or ("cuda" if hasattr(model, "device") else "cpu")
+        model_device = getattr(model, "device", None)
+        if hasattr(model_device, "type"):
+            model_device = model_device.type
+        self.device = device or model_device or "cpu"
 
     def encode_seed(self, text: str) -> List[int]:
         return encode_context(text, self.tokenizer)

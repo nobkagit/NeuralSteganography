@@ -8,6 +8,10 @@ from .mock import MockLM
 from .transformers_adapter import TransformersLM
 from ..exceptions import ConfigurationError
 
+_MODEL_ALIASES = {
+    "gpt2-fa": "HooshvareLab/gpt2-fa",
+}
+
 
 def load_lm(name: str, *, device: Optional[str] = None):
     name_norm = name.lower()
@@ -16,7 +20,8 @@ def load_lm(name: str, *, device: Optional[str] = None):
     if name_norm in {"gpt2", "gpt2-fa"}:
         from utils import get_model  # type: ignore
 
-        enc, model = get_model(model_name=name_norm)
+        model_repo = _MODEL_ALIASES.get(name_norm, name_norm)
+        enc, model = get_model(model_name=model_repo)
         return ArithmeticLM(model, enc, device=device)
     raise ConfigurationError(f"unknown language model provider: {name}")
 

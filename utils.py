@@ -69,19 +69,45 @@ def encode_context(raw_text, enc):
 
 # Use gpt2-medium for 345M param model
 # Use gpt2-large for 774M param model
+def _load_pretrained(factory, model_name):
+    try:
+        return factory.from_pretrained(model_name, local_files_only=True)
+    except OSError:
+        try:
+            return factory.from_pretrained(model_name)
+        except Exception as exc:
+            hint = (
+                f"failed to load pretrained weights for '{model_name}'. "
+                "Download the model with `python scripts/download_models.py --model "
+                f"{model_name}` before running offline."
+            )
+            raise RuntimeError(hint) from exc
+
 def get_model(seed=1234, model_name='gpt2'):
     np.random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        has_cuda = torch.cuda.is_available()
+    except Exception:
+        has_cuda = False
+    if has_cuda:
+        try:
+            torch.cuda.manual_seed(seed)
+        except Exception:
+            has_cuda = False
+    device = torch.device("cuda" if has_cuda else "cpu")
 
-    enc = AutoTokenizer.from_pretrained(model_name)
+    enc = _load_pretrained(AutoTokenizer, model_name)
     enc.unk_token = None
     enc.bos_token = None
     enc.eos_token = None
-    
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-    model.to(device)
+
+    model = _load_pretrained(AutoModelForCausalLM, model_name)
+    try:
+        model.to(device)
+    except Exception:
+        device = torch.device("cpu")
+        model.to(device)
     model.eval()
     # model.double()
 

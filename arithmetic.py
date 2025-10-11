@@ -9,6 +9,43 @@ from transformers import DynamicCache
 from utils import bits2int, entropy, int2bits, is_sent_finish, kl, limit_past, num_same_from_beg
 
 
+def _prepare_past_for_model(past):
+    if past is None:
+        return None
+    if isinstance(past, list):
+        return tuple(past)
+    return past
+
+
+def _normalise_past(past):
+    if past is None:
+        return None
+    if isinstance(past, DynamicCache):
+        past = past.to_legacy_cache()
+    limited = limit_past(past)
+    return tuple(limited)
+
+
+def _cache_seq_length(cache) -> int:
+    if cache is None:
+        return 0
+    if isinstance(cache, DynamicCache):
+        return int(cache.get_seq_length())
+    first_layer = cache[0]
+    if isinstance(first_layer, tuple):
+        key = first_layer[0]
+    else:
+        key = first_layer
+    return int(key.shape[-2])
+
+
+def _position_ids_for_cache(cache, device: str, max_positions: int):
+    if cache is None:
+        return None
+    past_len = _cache_seq_length(cache) % max_positions
+    return torch.tensor([[past_len]], device=device, dtype=torch.long)
+
+
 def _select_cutoff_k(probs: torch.Tensor, threshold: float, topk: int) -> int:
     """Return the number of tokens to keep when rounding probabilities.
 
@@ -49,6 +86,10 @@ def encode_arithmetic(
 ) -> Tuple[List[int], float, float, float, float]:
     """Encode a bit-stream into tokens via arithmetic coding."""
     context = torch.tensor(context[-1022:], device=device, dtype=torch.long)
+    model_config = getattr(model, "config", None)
+    max_positions = getattr(model_config, "n_positions", 1024)
+    model_config = getattr(model, "config", None)
+    max_positions = getattr(model_config, "n_positions", 1024)
 
     max_val = 2**precision
     # threshold = 2**(-precision)
@@ -69,10 +110,14 @@ def encode_arithmetic(
         i = 0
         sent_finish = False
         while i < len(message) or (finish_sent and not sent_finish):
-            out = model(prev.unsqueeze(0), past_key_values=DynamicCache.from_legacy_cache(past), use_cache=True)
+            cache = _prepare_past_for_model(past)
+            position_ids = _position_ids_for_cache(cache, device, max_positions)
+            if position_ids is None:
+                out = model(prev.unsqueeze(0), past_key_values=cache, use_cache=True)
+            else:
+                out = model(prev.unsqueeze(0), past_key_values=cache, use_cache=True, position_ids=position_ids)
             logits = out.logits
-            past = out.past_key_values
-            past = limit_past(past)
+            past = _normalise_past(out.past_key_values)
 
             logits[0, -1, -1] = -1e20 # endoftext token can't happen
             logits[0, -1, 628] = -1e20 # 2 newlines token can't happen
@@ -206,10 +251,14 @@ def decode_arithmetic(
     with torch.no_grad():
         i = 0
         while i < len(inp):
-            out = model(prev.unsqueeze(0), past_key_values=DynamicCache.from_legacy_cache(past), use_cache=True)
+            cache = _prepare_past_for_model(past)
+            position_ids = _position_ids_for_cache(cache, device, max_positions)
+            if position_ids is None:
+                out = model(prev.unsqueeze(0), past_key_values=cache, use_cache=True)
+            else:
+                out = model(prev.unsqueeze(0), past_key_values=cache, use_cache=True, position_ids=position_ids)
             logits = out.logits
-            past = out.past_key_values
-            past = limit_past(past)
+            past = _normalise_past(out.past_key_values)
 
             logits[0, -1, -1] = -1e10 # endoftext can't happen
             logits[0, -1, 628] = -1e10 # 2 newlines can't happen
