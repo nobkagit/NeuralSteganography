@@ -22,6 +22,7 @@ from typing import (
 )
 
 from .codec import assemble_bytes, build_packet, chunk_bytes, make_msg_id, parse_packet
+from .codec.errors import ArithmeticRangeError
 from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
 from .codec.arithmetic import (
     _coerce_optional_float,
@@ -77,20 +78,20 @@ class _AttemptConfig:
 
 
 _DEFAULT_QUALITY = {
-    "temp": 0.9,
+    "temp": 0.92,
     "precision": 16,
-    "top_k": 800,
-    "top_p": 0.95,
+    "top_k": 1200,
+    "top_p": 0.97,
     "cap_per_token_bits": 2,
     "finish_sent": True,
 }
 
 
 DEFAULT_GATE_THRESHOLDS: Dict[str, float] = {
-    "max_ppl": 80.0,
-    "max_ngram_repeat": 0.30,
-    "min_ttr": 0.30,
-    "max_avg_entropy": 4.7,
+    "max_ppl": 110.0,
+    "max_ngram_repeat": 0.34,
+    "min_ttr": 0.28,
+    "max_avg_entropy": 5.2,
 }
 
 
@@ -99,8 +100,8 @@ DEFAULT_REGEN_STRATEGY: Dict[str, Any] = {
         "در یک گفت‌وگوی کوتاه درباره‌ی فناوری صحبت می‌کنیم.",
         "در یک گفت‌وگوی دوستانه درباره‌ی فرهنگ و هنر صحبت می‌کنیم.",
     ],
-    "top_k_steps": [80, 70, 60],
-    "temperature_steps": [0.8, 0.7],
+    "top_k_steps": [600, 420, 280],
+    "temperature_steps": [0.85, 0.8],
 }
 
 
@@ -683,6 +684,8 @@ def cover_generate(
     total_attempts = max(regen_attempts, 0) + 1
     last_result: GuardResult | None = None
     last_cover = ""
+    failure_reasons: List[str] = []
+    failure_metrics: Dict[str, float] = {}
 
     for attempt_index, attempt in enumerate(
         _iter_attempts(seed_text, regen_attempts, strategy), start=1
@@ -690,16 +693,28 @@ def cover_generate(
         attempt_quality = dict(quality_args)
         attempt_quality.update(attempt.overrides)
 
-        cover_text = _generate_cover_once(
-            payload,
-            seed_text=attempt.seed_text,
-            quality=attempt_quality,
-            chunk_bytes=chunk_bytes,
-            use_crc=use_crc,
-            ecc=ecc,
-            nsym=nsym,
-            lm=lm_provider,
-        )
+        try:
+            cover_text = _generate_cover_once(
+                payload,
+                seed_text=attempt.seed_text,
+                quality=attempt_quality,
+                chunk_bytes=chunk_bytes,
+                use_crc=use_crc,
+                ecc=ecc,
+                nsym=nsym,
+                lm=lm_provider,
+            )
+        except ArithmeticRangeError as exc:
+            reason = "language model capacity exhausted during arithmetic coding"
+            failure_reasons.append(reason)
+            _quality_log(
+                (
+                    "[yellow]quality attempt "
+                    f"{attempt_index}/{total_attempts} ({attempt.seed_variant})"
+                    f" failed: {reason} ({exc})[/yellow]"
+                )
+            )
+            continue
 
         last_cover = cover_text
         guard_result = guard.evaluate(cover_text, thresholds)
@@ -729,16 +744,22 @@ def cover_generate(
         if guard_result.passed:
             return cover_text
 
+        if guard_result.reasons:
+            failure_reasons.extend(guard_result.reasons)
+        if guard_result.metrics:
+            failure_metrics = dict(guard_result.metrics)
+
         if attempt_index >= total_attempts:
             break
 
     if last_result is None:
-        raise QualityGateError(last_cover, ["quality evaluation failed"], {})
+        reasons = failure_reasons or ["quality evaluation failed"]
+        raise QualityGateError(last_cover, reasons, failure_metrics)
 
     raise QualityGateError(
         last_cover,
-        list(last_result.reasons),
-        dict(last_result.metrics),
+        failure_reasons or list(last_result.reasons),
+        failure_metrics or dict(last_result.metrics),
     )
 
 
