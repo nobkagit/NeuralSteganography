@@ -1,7 +1,5 @@
 import math
 
-import math
-
 import pytest
 
 from neuralstego.lm.transformers_adapter import TransformersLM

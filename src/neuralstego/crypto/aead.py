@@ -5,7 +5,7 @@ from __future__ import annotations
 from os import urandom
 from typing import Final
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore[import-not-found]
 
 __all__ = [
     "NONCE_SIZE",

@@ -5,7 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 import torch
 
 from neuralstego.crypto.arithmetic import decode_with_lm, encode_with_lm

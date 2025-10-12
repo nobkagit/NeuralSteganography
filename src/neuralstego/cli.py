@@ -9,15 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple
-
-try:  # pragma: no cover - optional dependency
-    from rich.console import Console
-except ModuleNotFoundError:  # pragma: no cover - fallback when rich is unavailable
-    class Console:  # type: ignore[override]
-        def print(self, *objects: object, **_: object) -> None:
-            text = " ".join(str(obj) for obj in objects)
-            print(text)
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Protocol, Sequence, Tuple, cast
 
 from .api import (
     DEFAULT_GATE_THRESHOLDS,
@@ -38,7 +30,27 @@ from .exceptions import (
 from .detect.guard import QualityGuard
 from .metrics import LMScorer
 
-console = Console()
+
+class _ConsolePrinter(Protocol):
+    def print(self, *objects: object, **kwargs: object) -> None:
+        ...
+
+
+class _ConsoleFallback:
+    def print(self, *objects: object, **_: object) -> None:
+        text = " ".join(str(obj) for obj in objects)
+        print(text)
+
+
+def _make_console() -> _ConsolePrinter:
+    try:  # pragma: no cover - optional dependency
+        from rich.console import Console  # type: ignore[import-not-found]
+    except ModuleNotFoundError:  # pragma: no cover - fallback when rich is unavailable
+        return _ConsoleFallback()
+    return cast(_ConsolePrinter, Console())
+
+
+console: _ConsolePrinter = _make_console()
 
 
 QUALITY_GUARD = QualityGuard(lm_scorer=LMScorer(prefer_transformers=False))
@@ -111,7 +123,7 @@ def _fallback_encode_text(
     message: str,
     password: str,
     *,
-    quality: Mapping[str, object],
+    quality: Mapping[str, object] | None,
     seed_text: str,
 ) -> Dict[str, Any]:
     encoding = "utf-8"
@@ -120,9 +132,10 @@ def _fallback_encode_text(
     key = _derive_fallback_key(password, seed_bytes)
     mask = key * ((len(payload) // len(key)) + 1)
     tokens = [int(p ^ mask[index]) for index, p in enumerate(payload)]
+    quality_map = dict(quality or {})
     result: Dict[str, Any] = {
         "encoding": encoding,
-        "quality": dict(quality),
+        "quality": quality_map,
         "tokens": tokens,
     }
     if seed_text:
@@ -161,23 +174,25 @@ def encode_text(
     message: str,
     password: str,
     *,
-    quality: Mapping[str, object],
+    quality: Mapping[str, object] | None = None,
     seed_text: str = "",
 ) -> Dict[str, Any]:
     """Wrapper around :func:`neuralstego.crypto.api.encode_text` for the CLI."""
 
     crypto_api, import_error = _get_crypto_api()
+    quality_map = dict(quality or {})
+
     if crypto_api is None:
         _fallback_warning(import_error)
         payload_dict = _fallback_encode_text(
             message,
             password,
-            quality=quality,
+            quality=quality_map,
             seed_text=seed_text,
         )
         return payload_dict
 
-    payload = crypto_api.encode_text(message, password, quality=quality, seed_text=seed_text)
+    payload = crypto_api.encode_text(message, password, quality=quality_map, seed_text=seed_text)
     try:
         decoded = json.loads(payload.decode("utf-8"))
     except json.JSONDecodeError as exc:  # pragma: no cover - defensive guard
@@ -433,12 +448,25 @@ def _handle_encode(argv: Sequence[str]) -> int:
 
     message = _read_text(args.input_path)
 
-    encode_kwargs: Dict[str, object] = {"quality": quality}
-    if args.seed_text:
-        encode_kwargs["seed_text"] = args.seed_text
-
     try:
-        payload = encode_text(message, args.password, **encode_kwargs)
+        seed_text = args.seed_text or ""
+        if quality and seed_text:
+            payload = encode_text(
+                message,
+                args.password,
+                quality=cast(Mapping[str, object], quality),
+                seed_text=seed_text,
+            )
+        elif quality:
+            payload = encode_text(
+                message,
+                args.password,
+                quality=cast(Mapping[str, object], quality),
+            )
+        elif seed_text:
+            payload = encode_text(message, args.password, seed_text=seed_text)
+        else:
+            payload = encode_text(message, args.password)
     except (ConfigurationError, NeuralStegoError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         return 1
@@ -466,17 +494,28 @@ def _handle_decode(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
     quality = _quality_from_pairs(args.quality)
 
-    decode_kwargs: Dict[str, object] = {}
-    if quality:
-        decode_kwargs["quality"] = quality
-    if args.seed_text:
-        decode_kwargs["seed_text"] = args.seed_text
-
     try:
         payload = _read_json(args.input_path)
         if not isinstance(payload, Mapping):
             raise ConfigurationError("encoded payload must be a JSON object")
-        message = decode_text(payload, args.password, **decode_kwargs)
+        seed_text = args.seed_text or ""
+        if quality and seed_text:
+            message = decode_text(
+                payload,
+                args.password,
+                quality=cast(Mapping[str, object], quality),
+                seed_text=seed_text,
+            )
+        elif quality:
+            message = decode_text(
+                payload,
+                args.password,
+                quality=cast(Mapping[str, object], quality),
+            )
+        elif seed_text:
+            message = decode_text(payload, args.password, seed_text=seed_text)
+        else:
+            message = decode_text(payload, args.password)
     except (ConfigurationError, NeuralStegoError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         return 1
@@ -912,4 +951,3 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - module entry point
     sys.exit(main())
-

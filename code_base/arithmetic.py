@@ -90,8 +90,6 @@ def encode_arithmetic(
     context = torch.tensor(context[-1022:], device=device, dtype=torch.long)
     model_config = getattr(model, "config", None)
     max_positions = getattr(model_config, "n_positions", 1024)
-    model_config = getattr(model, "config", None)
-    max_positions = getattr(model_config, "n_positions", 1024)
 
     max_val = 2**precision
     # threshold = 2**(-precision)
@@ -242,6 +240,8 @@ def decode_arithmetic(
             i += 1
 
     context = torch.tensor(context[-1022:], device=device, dtype=torch.long)
+    model_config = getattr(model, "config", None)
+    max_positions = getattr(model_config, "n_positions", 1024)
 
     max_val = 2**precision
     # threshold = 2**(-precision)

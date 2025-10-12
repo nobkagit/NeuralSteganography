@@ -109,7 +109,10 @@ def decode_text(payload: Mapping[str, object], password: str) -> str:
     if not isinstance(payload, Mapping):
         raise TypeError("Payload must be a mapping produced by encode_text.")
 
-    encoding = payload.get("encoding", "utf-8")
+    encoding_obj = payload.get("encoding", "utf-8")
+    if not isinstance(encoding_obj, str):
+        raise ValueError("Payload encoding must be a string.")
+    encoding = encoding_obj
     raw_tokens = payload.get("tokens")
     if not isinstance(raw_tokens, Sequence):
         raise ValueError("Payload does not contain token sequence.")

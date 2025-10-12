@@ -6,28 +6,50 @@ import importlib
 import importlib.util
 import pickle
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import Any, List, Protocol, Sequence, cast
 
 from .features import EXPECTED_FEATURES
+
+
+class _LogisticRegressionLike(Protocol):
+    def fit(self, X: Sequence[Sequence[float]], y: Sequence[int]) -> Any:  # pragma: no cover - protocol
+        ...
+
+    def predict_proba(self, X: Sequence[Sequence[float]]) -> Sequence[Sequence[float]]:  # pragma: no cover - protocol
+        ...
+
+
+class _LogisticRegressionFactory(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> _LogisticRegressionLike:  # pragma: no cover - protocol
+        ...
+
+
+class _LinearModelModule(Protocol):
+    LogisticRegression: _LogisticRegressionFactory
 
 
 @dataclass
 class DetectionClassifier:
     """Wrap a scikit-learn logistic regression model for suspiciousness scoring."""
 
-    model: object | None = None
+    model: _LogisticRegressionLike | None = None
     feature_order: Sequence[str] = EXPECTED_FEATURES
 
-    def _require_sklearn(self) -> object:
+    def _require_sklearn(self) -> _LinearModelModule:
         if importlib.util.find_spec("sklearn") is None:
             raise RuntimeError("scikit-learn is required for DetectionClassifier but is not installed")
-        return importlib.import_module("sklearn.linear_model")
+        module = importlib.import_module("sklearn.linear_model")
+        logistic = getattr(module, "LogisticRegression", None)
+        if not callable(logistic):
+            raise RuntimeError("scikit-learn.linear_model.LogisticRegression is unavailable")
+        return cast(_LinearModelModule, module)
 
     def train(self, X: Sequence[Sequence[float]], y: Sequence[int]) -> bytes:
         """Fit a logistic regression model and return a serialized representation."""
 
         linear_model = self._require_sklearn()
-        classifier = linear_model.LogisticRegression(max_iter=1000)
+        factory = cast(_LogisticRegressionFactory, linear_model.LogisticRegression)
+        classifier = factory(max_iter=1000)
         classifier.fit(X, y)
         self.model = classifier
         return pickle.dumps(classifier)
@@ -35,7 +57,7 @@ class DetectionClassifier:
     def load(self, payload: bytes) -> None:
         """Load a serialized logistic regression model."""
 
-        self.model = pickle.loads(payload)
+        self.model = cast(_LogisticRegressionLike, pickle.loads(payload))
 
     def _vectorize(self, features: dict[str, float]) -> List[float]:
         return [float(features.get(name, 0.0)) for name in self.feature_order]

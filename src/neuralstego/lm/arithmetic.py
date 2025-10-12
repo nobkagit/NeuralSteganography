@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, cast
 
 import torch
 
-from ..codec.arithmetic import decode_with_lm, encode_with_lm
+from ..codec.arithmetic import (
+    _coerce_optional_float,
+    _coerce_optional_int,
+    decode_with_lm,
+    encode_with_lm,
+)
 from ..codec.types import CodecState, LMProvider
 from ..exceptions import ConfigurationError
 
@@ -74,23 +79,31 @@ class _ModelAdapter(LMProvider):
         return probs
 
 
-def _normalise_quality(quality: Mapping[str, object] | None) -> Dict[str, float]:
+def _normalise_quality(quality: Mapping[str, object] | None) -> Dict[str, object]:
     if not quality:
         return {}
 
-    normalised: Dict[str, float] = {}
+    normalised: Dict[str, object] = {}
     for key, value in quality.items():
         if value is None:
             continue
         key_norm = key.replace("-", "_").lower()
         if key_norm in {"topk", "top_k"}:
-            normalised["top_k"] = float(int(value))
+            top_k = _coerce_optional_int(value, "top_k")
+            if top_k is not None:
+                normalised["top_k"] = top_k
         elif key_norm in {"topp", "top_p"}:
-            normalised["top_p"] = float(value)
+            top_p = _coerce_optional_float(value, "top_p")
+            if top_p is not None:
+                normalised["top_p"] = top_p
         elif key_norm in {"minprob", "min_prob"}:
-            normalised["min_prob"] = float(value)
+            min_prob = _coerce_optional_float(value, "min_prob")
+            if min_prob is not None:
+                normalised["min_prob"] = min_prob
         elif key_norm in {"cap_per_token_bits", "cap_bits_per_token"}:
-            normalised["cap_per_token_bits"] = float(int(value))
+            cap_bits = _coerce_optional_int(value, "cap_per_token_bits")
+            if cap_bits is not None:
+                normalised["cap_per_token_bits"] = cap_bits
     return normalised
 
 
@@ -99,7 +112,9 @@ def _quality_temperature(quality: Mapping[str, object] | None) -> float:
         return 1.0
     for key in ("temp", "temperature"):
         if key in quality and quality[key] is not None:
-            return float(quality[key])
+            coerced = _coerce_optional_float(quality[key], "temperature")
+            if coerced is not None:
+                return coerced
     return 1.0
 
 
@@ -108,7 +123,7 @@ def _quality_max_context(quality: Mapping[str, object] | None) -> Optional[int]:
         return None
     for key in ("max_context", "maxContext"):
         if key in quality and quality[key] is not None:
-            return int(quality[key])
+            return _coerce_optional_int(quality[key], "max_context")
     return None
 
 
@@ -120,8 +135,8 @@ class ArithmeticLM:
         self.tokenizer = tokenizer
 
         model_device = getattr(model, "device", None)
-        if hasattr(model_device, "type"):
-            model_device = model_device.type
+        if model_device is not None and hasattr(model_device, "type"):
+            model_device = cast(Any, model_device).type
         resolved_device = device or model_device or "cpu"
 
         if isinstance(resolved_device, str):
@@ -172,7 +187,7 @@ class ArithmeticLM:
         max_context = _quality_max_context(quality)
 
         provider = _ModelAdapter(self.model, temperature=temperature, max_context=max_context)
-        state: MutableMapping[str, object] = {}
+        state: CodecState = {}
         tokens = encode_with_lm(
             payload,
             provider,
@@ -183,11 +198,12 @@ class ArithmeticLM:
         )
 
         codec_state: CodecState = {
-            "history": tuple(int(value) for value in state.get("history", ())),
+            "history": tuple(int(value) for value in cast(Sequence[int] | None, state.get("history")) or ()),
             "residual_bits": bytes(state.get("residual_bits", b"")),
         }
-        self._encode_states.append(dict(codec_state))
-        self._decode_states.append(dict(codec_state))
+        snapshot: CodecState = {**codec_state}
+        self._encode_states.append(snapshot)
+        self._decode_states.append({**codec_state})
         return [int(token) for token in tokens]
 
     def decode_arithmetic(
@@ -205,8 +221,8 @@ class ArithmeticLM:
             raise ConfigurationError("decode state unavailable for ArithmeticLM")
 
         state_snapshot = self._decode_states.popleft()
-        decode_state: MutableMapping[str, object] = {
-            "history": tuple(int(value) for value in state_snapshot.get("history", ())),
+        decode_state: CodecState = {
+            "history": tuple(int(value) for value in cast(Sequence[int] | None, state_snapshot.get("history")) or ()),
             "residual_bits": bytes(state_snapshot.get("residual_bits", b"")),
         }
 
@@ -227,12 +243,12 @@ class ArithmeticLM:
 
     # ------------------------------------------------------------------
     def drain_states(self) -> List[CodecState]:
-        states = [dict(state) for state in self._encode_states]
+        states = [cast(CodecState, {**state}) for state in self._encode_states]
         self._encode_states.clear()
         return states
 
     def load_states(self, states: Iterable[CodecState]) -> None:
-        self._decode_states = deque(dict(state) for state in states)
+        self._decode_states = deque(cast(CodecState, {**state}) for state in states)
 
 
 __all__ = ["ArithmeticLM"]
