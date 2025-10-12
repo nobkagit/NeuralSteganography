@@ -31,3 +31,18 @@ def test_text_to_spans_not_implemented():
     tok = DummyTokenizer()
     with pytest.raises(NotImplementedError):
         text_to_spans("متن", [1, 2], tok)
+
+
+def test_text_to_spans_roundtrip_with_lengths():
+    tok = DummyTokenizer()
+    seed = "مقدمه"
+    seed_ids = seed_to_ids(seed, tok)
+    spans = [[ord(" "), ord("س"), ord("ل"), ord("ا"), ord("م")], [ord("!")]]
+    text = spans_to_text(spans, seed_ids, tok)
+    recovered = text_to_spans(
+        text,
+        seed_ids,
+        tok,
+        span_lengths=[len(span) for span in spans],
+    )
+    assert recovered == spans
