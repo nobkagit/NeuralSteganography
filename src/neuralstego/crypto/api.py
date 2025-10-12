@@ -162,7 +162,7 @@ def encode_text(
     lm = _resolve_language_model(quality)
 
     ciphertext = encrypt_message(message.encode("utf-8"), password)
-    def _encode_with_lm(lm_instance: LMProvider) -> tuple[list[int], list[int], dict[str, Any]]:
+    def _encode_with_lm(lm_instance: LMProvider) -> tuple[list[int], list[int], CodecState]:
         context_ids_local = _seed_to_context(seed_text, lm_instance)
         tokens_local, state_local = encode_arithmetic(
             ciphertext,
@@ -183,10 +183,17 @@ def encode_text(
 
     tokens = tokens_list
 
+    history_values = cast(Sequence[int], state.get("history", ()) or ())
+    residual_bytes_value = state.get("residual_bits", b"")
+    if isinstance(residual_bytes_value, (bytes, bytearray)):
+        residual_serial = bytes(residual_bytes_value)
+    else:
+        residual_sequence = cast(Sequence[int], residual_bytes_value or ())
+        residual_serial = bytes(int(value) & 0xFF for value in residual_sequence)
     payload = {
         "tokens": list(map(int, tokens)),
-        "history": list(map(int, state.get("history", ()) or ())),
-        "residual_bits": _encode_bytes(state.get("residual_bits", b"")),
+        "history": [int(value) for value in history_values],
+        "residual_bits": _encode_bytes(residual_serial),
         "seed_checksum": _seed_checksum(seed_text),
     }
 
@@ -245,9 +252,9 @@ def _resolve_language_model(quality: Mapping[str, object]) -> LMProvider:
         return cast(LMProvider, candidate)
     if callable(candidate):
         lm = candidate()
-        if not isinstance(lm, LMProvider):  # pragma: no cover - defensive
+        if not all(hasattr(lm, attr) for attr in ("encode_arithmetic", "decode_arithmetic", "encode_seed")):
             raise TypeError("Custom LM factory must return an LMProvider instance")
-        return lm
+        return cast(LMProvider, lm)
 
     try:
         return TransformersLM()

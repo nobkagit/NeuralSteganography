@@ -4,14 +4,34 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence, TYPE_CHECKING, cast
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, GPT2LMHeadModel
 
+from .arithmetic import _coerce_optional_float, _coerce_optional_int
 from .quality import apply_quality
 from .types import LMProvider, ProbDist
+
+if TYPE_CHECKING:  # pragma: no cover - typing hints only
+    from transformers import AutoTokenizer as _AutoTokenizerType
+    from transformers import GPT2LMHeadModel as _GPT2LMHeadModelType
+else:  # pragma: no cover - runtime fallback when transformers is unavailable
+    _AutoTokenizerType = Any
+    _GPT2LMHeadModelType = Any
+
+AutoTokenizerImpl: Any = None
+GPT2LMHeadModelImpl: Any = None
+
+try:  # pragma: no cover - optional dependency guard
+    from transformers import AutoTokenizer as AutoTokenizerImpl
+    from transformers import GPT2LMHeadModel as GPT2LMHeadModelImpl
+except ModuleNotFoundError:  # pragma: no cover - optional dependency guard
+    AutoTokenizerImpl = None
+    GPT2LMHeadModelImpl = None
+
+AutoTokenizer = cast(Any, AutoTokenizerImpl)
+GPT2LMHeadModel = cast(Any, GPT2LMHeadModelImpl)
 
 
 @dataclass
@@ -76,9 +96,9 @@ class TransformersLM(LMProvider):
         temperature: float = 1.0,
         max_context: int | None = None,
         model_kwargs: Mapping[str, Any] | None = None,
-        model_loader: Callable[[], GPT2LMHeadModel] | None = None,
+        model_loader: Callable[[], Any] | None = None,
         tokenizer_loader: Callable[[], Any] | None = None,
-        model: GPT2LMHeadModel | None = None,
+        model: Any | None = None,
         tokenizer: Any | None = None,
     ) -> None:
         if temperature <= 0.0:
@@ -93,26 +113,27 @@ class TransformersLM(LMProvider):
             except AttributeError as exc:  # pragma: no cover - defensive guard
                 raise ValueError(f"Unknown torch dtype: {torch_dtype}") from exc
         self._torch_dtype = torch_dtype
-        self._top_k = top_k
-        self._top_p = top_p
-        self._min_prob = min_prob
+        self._top_k = _coerce_optional_int(top_k, "top_k")
+        self._top_p = _coerce_optional_float(top_p, "top_p")
+        self._min_prob = _coerce_optional_float(min_prob, "min_prob")
         self._temperature = float(temperature)
         self._max_context = max_context
         self._model_kwargs = dict(model_kwargs or {})
         self._model_loader = model_loader
         self._tokenizer_loader = tokenizer_loader
-        self._model: GPT2LMHeadModel | None = model
+        self._model: Any | None = model
         self.tokenizer = tokenizer
 
     def next_token_probs(self, context_ids: Sequence[int]) -> ProbDist:
         """Return next-token probabilities for ``context_ids``."""
 
         model = self._ensure_model()
-        context = tuple(context_ids)
+        context: tuple[int, ...] | None = tuple(int(token) for token in context_ids)
         if not context:
             context = self._default_context(model)
             if not context:
                 raise ValueError("context_ids must contain at least one token")
+        assert context is not None
         if self._max_context is None:
             context_window = getattr(model.config, "n_positions", None)
         else:
@@ -130,18 +151,19 @@ class TransformersLM(LMProvider):
         probs = _softmax(logits / self._temperature)
 
         if any(param is not None for param in (self._top_k, self._top_p, self._min_prob)):
-            probs = apply_quality(
+            filtered = apply_quality(
                 probs,
                 top_k=self._top_k,
                 top_p=self._top_p,
                 min_prob=self._min_prob,
             )
+            probs = cast(np.ndarray, filtered)
         else:
             probs = probs / probs.sum()
 
         return probs
 
-    def _ensure_model(self) -> GPT2LMHeadModel:
+    def _ensure_model(self) -> Any:
         if self._model is None:
             if self._model_loader is not None:
                 model = self._model_loader()
@@ -173,7 +195,7 @@ class TransformersLM(LMProvider):
             self.tokenizer = self._load_tokenizer()
         return self.tokenizer
 
-    def _default_context(self, model: GPT2LMHeadModel) -> tuple[int, ...] | None:
+    def _default_context(self, model: Any) -> tuple[int, ...] | None:
         """Return a fallback context tuple when none is provided."""
 
         config = getattr(model, "config", None)

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from ..codec.errors import QualityConfigError
 from ..codec.types import ProbDist
@@ -89,22 +91,25 @@ def apply_quality(
     return _arrays_to_dist(tokens, filtered, dist)
 
 
-def _dist_to_arrays(dist: ProbDist) -> tuple[np.ndarray, np.ndarray]:
+def _dist_to_arrays(dist: ProbDist) -> tuple[NDArray[np.int_], NDArray[np.float64]]:
     if isinstance(dist, np.ndarray):
-        probs = dist.astype(np.float64, copy=True)
-        tokens = np.arange(probs.size, dtype=np.int64)
+        probs = np.asarray(dist, dtype=np.float64)
+        tokens = cast(NDArray[np.int_], np.arange(probs.size, dtype=np.int64))
         return tokens, probs
     if isinstance(dist, dict):
         items = sorted(dist.items())
-        tokens = np.array([int(token) for token, _ in items], dtype=np.int64)
+        tokens = cast(
+            NDArray[np.int_],
+            np.array([int(token) for token, _ in items], dtype=np.int64),
+        )
         probs = np.array([float(prob) for _, prob in items], dtype=np.float64)
         return tokens, probs
     raise TypeError(f"Unsupported distribution type: {type(dist)!r}")
 
 
 def _arrays_to_dist(
-    tokens: np.ndarray,
-    probs: np.ndarray,
+    tokens: NDArray[np.int_],
+    probs: NDArray[np.float64],
     original: ProbDist,
 ) -> ProbDist:
     if isinstance(original, np.ndarray):
@@ -119,7 +124,7 @@ def _arrays_to_dist(
     return mapping
 
 
-def _normalise(values: np.ndarray) -> np.ndarray:
+def _normalise(values: NDArray[np.float64]) -> NDArray[np.float64]:
     total = float(values.sum())
     if not math.isfinite(total) or total <= 0.0:
         raise QualityConfigError("Probability mass vanished during normalisation")

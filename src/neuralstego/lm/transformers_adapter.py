@@ -1,18 +1,35 @@
 """Adapters for Hugging Face Transformers language models."""
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional
+from types import ModuleType
+from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING, cast
+
+if TYPE_CHECKING:  # pragma: no cover - typing hints only
+    from transformers import AutoModelForCausalLM as _AutoModelForCausalLMType
+    from transformers import AutoTokenizer as _AutoTokenizerType
+else:  # pragma: no cover - fallback types when transformers is unavailable
+    _AutoModelForCausalLMType = Any
+    _AutoTokenizerType = Any
+
+torch_module: ModuleType | None
+AutoModelForCausalLMImpl: Any = None
+AutoTokenizerImpl: Any = None
 
 try:  # pragma: no cover - optional dependency import guard
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import torch as torch_module  # type: ignore[import-not-found]
+    from transformers import AutoModelForCausalLM as AutoModelForCausalLMImpl
+    from transformers import AutoTokenizer as AutoTokenizerImpl
 except ModuleNotFoundError as exc:  # pragma: no cover - defer failure until runtime use
-    torch = None  # type: ignore[assignment]
-    AutoModelForCausalLM = None  # type: ignore[assignment]
-    AutoTokenizer = None  # type: ignore[assignment]
-    _IMPORT_ERROR = exc
+    torch_module = None
+    AutoModelForCausalLMImpl = None
+    AutoTokenizerImpl = None
+    _IMPORT_ERROR: ModuleNotFoundError | None = exc
 else:  # pragma: no cover - executed when dependencies are available
     _IMPORT_ERROR = None
+
+torch: Any = torch_module
+AutoModelForCausalLM = cast(Any, AutoModelForCausalLMImpl)
+AutoTokenizer = cast(Any, AutoTokenizerImpl)
 
 
 class TransformersLM:
@@ -26,8 +43,8 @@ class TransformersLM:
     ) -> None:
         self._model_name = model_name
         self._device = device
-        self._tokenizer = None
-        self._model = None
+        self._tokenizer: Any = None
+        self._model: Any = None
 
     # -- Internal helpers -------------------------------------------------
     def _require_dependencies(self) -> None:
