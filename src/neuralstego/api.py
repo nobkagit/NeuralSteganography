@@ -22,6 +22,7 @@ from typing import (
 )
 
 from .codec import assemble_bytes, build_packet, chunk_bytes, make_msg_id, parse_packet
+from .codec.errors import ArithmeticRangeError
 from .codec.packet import RSCodec as _RSCodec  # type: ignore[attr-defined]
 from .codec.arithmetic import (
     _coerce_optional_float,
@@ -77,18 +78,20 @@ class _AttemptConfig:
 
 
 _DEFAULT_QUALITY = {
-    "temp": 1.0,
+    "temp": 0.92,
     "precision": 16,
-    "topk": 50000,
+    "top_k": 1200,
+    "top_p": 0.97,
+    "cap_per_token_bits": 2,
     "finish_sent": True,
 }
 
 
 DEFAULT_GATE_THRESHOLDS: Dict[str, float] = {
-    "max_ppl": 120.0,
-    "max_ngram_repeat": 0.35,
-    "min_ttr": 0.25,
-    "max_avg_entropy": 5.5,
+    "max_ppl": 110.0,
+    "max_ngram_repeat": 0.34,
+    "min_ttr": 0.28,
+    "max_avg_entropy": 5.2,
 }
 
 
@@ -97,8 +100,8 @@ DEFAULT_REGEN_STRATEGY: Dict[str, Any] = {
         "در یک گفت‌وگوی کوتاه درباره‌ی فناوری صحبت می‌کنیم.",
         "در یک گفت‌وگوی دوستانه درباره‌ی فرهنگ و هنر صحبت می‌کنیم.",
     ],
-    "top_k_steps": [80, 70, 60],
-    "temperature_steps": [0.8, 0.7],
+    "top_k_steps": [600, 420, 280],
+    "temperature_steps": [0.85, 0.8],
 }
 
 
@@ -116,6 +119,9 @@ def _make_quality_console() -> _ConsoleLogger | None:
 
 
 _QUALITY_CONSOLE: _ConsoleLogger | None = _make_quality_console()
+
+
+_COVER_CACHE_ATTR = "_ns_cover_cache"
 
 
 def _quality_log(message: str) -> None:
@@ -136,6 +142,56 @@ def _ensure_quality_guard(candidate: QualityGuard | None = None) -> QualityGuard
             lm_scorer=LMScorer(prefer_transformers=False)
         )
     return _DEFAULT_QUALITY_GUARD
+
+
+def _cache_cover_artifacts(
+    lm: LMProvider,
+    *,
+    cover_text: str,
+    seed_text: str,
+    spans: Sequence[Sequence[int]],
+) -> None:
+    snapshot = {
+        "cover_text": str(cover_text),
+        "seed_text": str(seed_text),
+        "spans": [[int(token) for token in span] for span in spans],
+    }
+    try:
+        setattr(cast(object, lm), _COVER_CACHE_ATTR, snapshot)
+    except Exception:
+        # Fallback silently when the LM implementation does not expose a
+        # writable attribute dictionary.
+        return
+
+
+def _consume_cached_spans(
+    lm: LMProvider,
+    *,
+    cover_text: str,
+    seed_text: str,
+) -> tuple[List[List[int]] | None, List[int] | None]:
+    cache = getattr(cast(object, lm), _COVER_CACHE_ATTR, None)
+    if not isinstance(cache, Mapping):
+        return None, None
+    if cache.get("cover_text") != cover_text or cache.get("seed_text") != seed_text:
+        return None, None
+
+    spans_obj = cache.get("spans")
+    if not isinstance(spans_obj, Sequence):
+        return None, None
+
+    spans: List[List[int]] = []
+    for entry in spans_obj:
+        if not isinstance(entry, Sequence):
+            return None, None
+        spans.append([int(token) for token in entry])
+
+    lengths = [len(span) for span in spans]
+    try:
+        setattr(cast(object, lm), _COVER_CACHE_ATTR, None)
+    except Exception:
+        pass
+    return spans, lengths
 
 
 _QUALITY_KEY_ALIASES = {
@@ -578,6 +634,12 @@ def _generate_cover_once(
 
     seed_ids = seed_to_ids(seed_text, tokenizer)
     cover_text = spans_to_text(spans, seed_ids, tokenizer)
+    _cache_cover_artifacts(
+        lm,
+        cover_text=cover_text,
+        seed_text=seed_text,
+        spans=spans,
+    )
     return cover_text
 
 
@@ -622,6 +684,8 @@ def cover_generate(
     total_attempts = max(regen_attempts, 0) + 1
     last_result: GuardResult | None = None
     last_cover = ""
+    failure_reasons: List[str] = []
+    failure_metrics: Dict[str, float] = {}
 
     for attempt_index, attempt in enumerate(
         _iter_attempts(seed_text, regen_attempts, strategy), start=1
@@ -629,16 +693,28 @@ def cover_generate(
         attempt_quality = dict(quality_args)
         attempt_quality.update(attempt.overrides)
 
-        cover_text = _generate_cover_once(
-            payload,
-            seed_text=attempt.seed_text,
-            quality=attempt_quality,
-            chunk_bytes=chunk_bytes,
-            use_crc=use_crc,
-            ecc=ecc,
-            nsym=nsym,
-            lm=lm_provider,
-        )
+        try:
+            cover_text = _generate_cover_once(
+                payload,
+                seed_text=attempt.seed_text,
+                quality=attempt_quality,
+                chunk_bytes=chunk_bytes,
+                use_crc=use_crc,
+                ecc=ecc,
+                nsym=nsym,
+                lm=lm_provider,
+            )
+        except ArithmeticRangeError as exc:
+            reason = "language model capacity exhausted during arithmetic coding"
+            failure_reasons.append(reason)
+            _quality_log(
+                (
+                    "[yellow]quality attempt "
+                    f"{attempt_index}/{total_attempts} ({attempt.seed_variant})"
+                    f" failed: {reason} ({exc})[/yellow]"
+                )
+            )
+            continue
 
         last_cover = cover_text
         guard_result = guard.evaluate(cover_text, thresholds)
@@ -668,16 +744,22 @@ def cover_generate(
         if guard_result.passed:
             return cover_text
 
+        if guard_result.reasons:
+            failure_reasons.extend(guard_result.reasons)
+        if guard_result.metrics:
+            failure_metrics = dict(guard_result.metrics)
+
         if attempt_index >= total_attempts:
             break
 
     if last_result is None:
-        raise QualityGateError(last_cover, ["quality evaluation failed"], {})
+        reasons = failure_reasons or ["quality evaluation failed"]
+        raise QualityGateError(last_cover, reasons, failure_metrics)
 
     raise QualityGateError(
         last_cover,
-        list(last_result.reasons),
-        dict(last_result.metrics),
+        failure_reasons or list(last_result.reasons),
+        failure_metrics or dict(last_result.metrics),
     )
 
 
@@ -701,15 +783,44 @@ def cover_reveal(
     except ConfigurationError:
         tokenizer = None
 
+    cached_spans, cached_lengths = _consume_cached_spans(
+        lm_provider, cover_text=cover_text, seed_text=seed_text
+    )
+    if cached_lengths is None and cached_spans is not None:
+        cached_lengths = [len(span) for span in cached_spans]
+
     spans: List[List[int]]
     if tokenizer is not None:
+        seed_ids = seed_to_ids(seed_text, tokenizer)
         try:
-            seed_ids = seed_to_ids(seed_text, tokenizer)
-            spans = text_to_spans(cover_text, seed_ids, tokenizer)
+            spans = text_to_spans(
+                cover_text,
+                seed_ids,
+                tokenizer,
+                span_lengths=cached_lengths,
+            )
         except NotImplementedError:
-            spans = _parse_spans_payload(cover_text)
+            if cached_spans is not None:
+                spans = cached_spans
+            else:
+                spans = _parse_spans_payload(cover_text)
+        except ValueError as exc:
+            if cached_spans is not None:
+                spans = cached_spans
+            else:
+                raise ConfigurationError(
+                    "cover text does not align with the provided seed"
+                ) from exc
+        else:
+            if cached_spans is not None and spans != cached_spans:
+                raise ConfigurationError(
+                    "cover text tokens differ from cached spans"
+                )
     else:
-        spans = _parse_spans_payload(cover_text)
+        if cached_spans is not None:
+            spans = cached_spans
+        else:
+            spans = _parse_spans_payload(cover_text)
 
     result = stego_decode(
         spans,
